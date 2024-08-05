@@ -1708,6 +1708,89 @@ def calibrate_steady_state(temp_increases, pressures, print_report=False):
     return quad_linear_inv
     #return log_linear_inv
 
+
+def get_steady_state_functions(coeffs, streaming_cutoff=2.8):
+
+    
+    def water_quadratic(x,a,b):
+
+        disc = np.sqrt(b**2 + 4*a*x)/(2*a)
+
+        first_part = -b/(2*a)
+        
+
+        return first_part + disc
+    
+    def true_water_quadratic(x,a):
+        return a*np.sqrt(x)
+    
+    def true_water_quadratic_with_emission(x,a,b,c):
+        stefan_boltz = 5.6703e-8
+        emissitivity = 0.88
+        #return np.sqrt(a*x+b*(x**4))
+        return b*np.sqrt(a*x+c*stefan_boltz*emissitivity*((x+294.15)**4-294.15**4))
+
+    def true_water_quadratic_with_emission_variable_h(x,a,b,c):
+        stefan_boltz = 5.6703e-8
+        emissitivity = 0.88
+        #return np.sqrt(a*x+b*(x**4))
+        return b*np.sqrt(a*x*x.clip(min=streaming_cutoff)+c*stefan_boltz*emissitivity*((x+294.15)**4-294.15**4))
+    
+    def true_water_quadratic_variable_h(x,a,b):
+        #return np.sqrt(a*x+b*(x**4))
+        return b*np.sqrt(a*x*x.clip(min=streaming_cutoff))
+
+    def water_paper_curve(temps):
+        temps[temps<0] = 0
+        pressure = np.empty_like(temps)
+        pressure = sqrt_mine(temps,coeffs[0][0],coeffs[0][1])
+
+        pressure[pressure<0] = 0
+        return pressure
+    
+    def water_paper_curve_quad(temps):
+        temps[temps<0] = 0
+        pressure = np.empty_like(temps)
+        pressure = water_quadratic(temps,coeffs[1][0],coeffs[1][1])
+
+        pressure[pressure<0] = 0
+        return pressure
+    
+    def water_paper_curve_quad_true(temps):
+        temps[temps<0] = 0
+        pressure = np.empty_like(temps)
+        pressure = true_water_quadratic(temps,coeffs[2][0])
+
+        pressure[pressure<0] = 0
+        return pressure
+    
+    def water_paper_curve_quad_emission(temps):
+        temps[temps<0] = 0
+        pressure = np.empty_like(temps)
+        pressure = true_water_quadratic_with_emission(temps,coeffs[3][0],coeffs[3][1],coeffs[3][2])
+
+        pressure[pressure<0] = 0
+        return pressure
+    
+    def water_paper_curve_quad_emission_var_h(temps):
+        temps[temps<0] = 0
+        pressure = np.empty_like(temps)
+        pressure = true_water_quadratic_with_emission_variable_h(temps,coeffs[4][0],coeffs[4][1],coeffs[4][2])
+
+        pressure[pressure<0] = 0
+        return pressure
+    
+    def water_paper_curve_quad_var_h(temps):
+        temps[temps<0] = 0
+        pressure = np.empty_like(temps)
+        pressure = true_water_quadratic_variable_h(temps,coeffs[5][0],coeffs[5][1])
+
+        pressure[pressure<0] = 0
+        return pressure
+    
+    return water_paper_curve, water_paper_curve_quad, water_paper_curve_quad_true, water_paper_curve_quad_emission, water_paper_curve_quad_emission_var_h, water_paper_curve_quad_var_h
+
+
 def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, sigma=0, use_sigma=False,streaming_cutoff=2.8):
 
     temp_increases = [0] + temp_increases
@@ -1795,6 +1878,8 @@ def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, 
         params = curve_fit(true_water_quadratic_variable_h, temp_increases,pressures,bounds=([0.0000000000000000000000000000000000001,-np.inf],[np.inf,np.inf]),maxfev=100000,sigma=sigma)
         [a12,b12] = params[0]
         #print(a12,b12)
+
+    coeffs = [[a7,b7],[a8,b8],[a9],[a10,b10,c10],[a11,b11,c11],[a12,b12]]
 
     def water_paper_curve(temps):
         temps[temps<0] = 0
@@ -1897,7 +1982,7 @@ def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, 
         ax1.set_xlim(0,3500)
         ax1.legend()
     
-    return water_paper_curve, water_paper_curve_quad, water_paper_curve_quad_true, water_paper_curve_quad_emission, water_paper_curve_quad_emission_var_h, water_paper_curve_quad_var_h
+    return water_paper_curve, water_paper_curve_quad, water_paper_curve_quad_true, water_paper_curve_quad_emission, water_paper_curve_quad_emission_var_h, water_paper_curve_quad_var_h, coeffs
     
 
 def calibrate_steady_state_naive_constant_sigma(temp_increases, pressures,sigma, print_report=False):
