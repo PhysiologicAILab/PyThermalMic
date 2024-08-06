@@ -1,3 +1,4 @@
+import pickle
 import sys
 from platform import python_version
 
@@ -59,6 +60,34 @@ import matplotlib.scale as mscale
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import matplotlib.ticker as ticker
+
+def strip_time(time_string):
+    time_string_split = time_string.split(":")
+    return ":".join(time_string_split[1:])
+
+def load_flir_file(file, stop_frame = 0):
+    im = fnv.file.ImagerFile(file)    # open the file
+    im.unit = fnv.Unit.TEMPERATURE_FACTORY      # set the desired unit
+    if stop_frame == 0:
+        stop_frame = im.num_frames
+    vid = np.zeros((im.height, im.width,stop_frame),dtype="float32")
+    timestamps = np.zeros((stop_frame))
+    for i in range(stop_frame):
+        im.get_frame(i)                         # get the next frame
+        for f in im.frame_info:
+            if f['name'] == "Time":
+                timestamp = f['value']
+                timestamp_time = datetime.strptime(strip_time(timestamp),"%H:%M:%S.%f")
+                timestamp_time = timestamp_time.replace(year=1970)
+        final = np.array(im.final,copy=True).reshape((im.height, im.width))
+        timestamps[i] = timestamp_time.replace(tzinfo=timezone.utc).timestamp()
+        vid[:,:,i] = final
+    return vid, timestamps
+
+test_thermal = f"checkerboard-000001.seq"
+
+thermal, thermal_timestamps = load_flir_file(test_thermal)
+import cv2 as cv
 
 correction_0_degree = 4.38
 correction_90_degree = 0.8
@@ -193,28 +222,9 @@ def laplace_2d(mat, dx, dy):
     stencil = np.array([[0, -1, 0],[-1, 4, -1], [0, -1, 0]])
     return convolve(mat, stencil, mode='nearest') / dx**2
 
-def strip_time(time_string):
-    time_string_split = time_string.split(":")
-    return ":".join(time_string_split[1:])
 
-def load_flir_file(file, stop_frame = 0):
-    im = fnv.file.ImagerFile(file)    # open the file
-    im.unit = fnv.Unit.TEMPERATURE_FACTORY      # set the desired unit
-    if stop_frame == 0:
-        stop_frame = im.num_frames
-    vid = np.zeros((im.height, im.width,stop_frame),dtype="float32")
-    timestamps = np.zeros((stop_frame))
-    for i in range(stop_frame):
-        im.get_frame(i)                         # get the next frame
-        for f in im.frame_info:
-            if f['name'] == "Time":
-                timestamp = f['value']
-                timestamp_time = datetime.strptime(strip_time(timestamp),"%H:%M:%S.%f")
-                timestamp_time = timestamp_time.replace(year=1970)
-        final = np.array(im.final,copy=True).reshape((im.height, im.width))
-        timestamps[i] = timestamp_time.replace(tzinfo=timezone.utc).timestamp()
-        vid[:,:,i] = final
-    return vid, timestamps
+
+
    
 def find_elbow(data, theta):
 
@@ -818,7 +828,7 @@ def temporal_noise_reduction(thermal,M,D=15,color_sigma=25,spatial_sigma=25):
         if i == 0:
             fn_last = 0
         else:
-            BF = cv_mine.bilateralFilter(thermal[i,:,:].astype(np.float32), D, color_sigma, spatial_sigma) 
+            BF = cv.bilateralFilter(thermal[i,:,:].astype(np.float32), D, color_sigma, spatial_sigma) 
             #BF = skimage.restoration.denoise_bilateral(thermal[i,:,:],D,color_sigma,spatial_sigma,mode="edge")
             xBFr = thermal[i,:,:] - BF
             fn = ((1.0/M) * xBFr) + ((1-(1.0/M))*fn_last)
@@ -2157,21 +2167,18 @@ def correct(thermal):
             [  0.,           0.,           1.        ]])
     dist = np.array([[-0.35088421,-0.7898929,0.02189668, -0.01589549,  4.39172435]])
     h,  w = thermal.shape[:2]
-    newcameramtx, roi = cv_mine.getOptimalNewCameraMatrix(mtx, dist, (w,h), 1, (w,h))
+    newcameramtx, roi = cv.getOptimalNewCameraMatrix(mtx, dist, (w,h), 1, (w,h))
 
     # undistort
-    mapx, mapy = cv_mine.initUndistortRectifyMap(mtx, dist, None, newcameramtx, (w,h), 5)
-    dst = cv_mine.remap(thermal, mapx, mapy, cv_mine.INTER_LINEAR)
+    mapx, mapy = cv.initUndistortRectifyMap(mtx, dist, None, newcameramtx, (w,h), 5)
+    dst = cv.remap(thermal, mapx, mapy, cv.INTER_LINEAR)
     # crop the image
     x, y, w, h = roi
     dst = dst[y:y+h, x:x+w]
     return dst
 
 
-test_thermal = f"checkerboard-000001.seq"
 
-thermal, thermal_timestamps = load_flir_file(test_thermal)
-import cv2 as cv_mine
 
 def get_size_from_mic_file(mic_file):
     mic_values = read_beast_file_rms(mic_file,plane_axis_1="y")
@@ -2187,9 +2194,16 @@ def get_size_from_mic_file(mic_file):
     return size
 
 def load_thermal_file(thermal_file, xs=None, ys=None, start_lower_bound=0, start_upper_bound=10000, start_default=0):
-    un_corr_thermal, thermal_timestamps = load_flir_file(thermal_file)
+    un_corr_thermal = None
+    thermal_timestamps = None
+    if thermal_file.split(".")[-1] == "seq":
+        un_corr_thermal, thermal_timestamps = load_flir_file(thermal_file)
+        un_corr_thermal = np.einsum("hwt -> thw", un_corr_thermal)
+    elif thermal_file.split(".")[-1] == "thermal":
+        with open(thermal_file, 'wb') as inp:
+            thermal_timestamps = pickle.load(inp)
+            un_corr_thermal = pickle.load(inp)
 
-    un_corr_thermal = np.einsum("hwt -> thw", un_corr_thermal)
 
     un_corr_thermal_nuc = remove_banding_batch(un_corr_thermal,(0,0),(75,320))
 
@@ -2202,7 +2216,7 @@ def load_thermal_file(thermal_file, xs=None, ys=None, start_lower_bound=0, start
     for i in range(600):
         thermal[i,:,:] = correct(un_corr_thermal[i,:,:])
         thermal_nuc[i,:,:] = correct(un_corr_thermal_nuc[i,:,:])
-        thermal_nuc[i,:,:] = cv_mine.blur(thermal_nuc[i,:,:],(7,7))
+        thermal_nuc[i,:,:] = cv.blur(thermal_nuc[i,:,:],(7,7))
 
     if xs == None or ys == None:
         # fill in xs and ys with the whole size
@@ -2231,10 +2245,16 @@ def load_thermal_file(thermal_file, xs=None, ys=None, start_lower_bound=0, start
     
 
 def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10, start_upper_bound=30, start_default=25):
-        
-    un_corr_thermal, thermal_timestamps = load_flir_file(thermal_file)
-
-    un_corr_thermal = np.einsum("hwt -> thw", un_corr_thermal)
+    
+    un_corr_thermal = None
+    thermal_timestamps = None
+    if thermal_file.split(".")[-1] == "seq":
+        un_corr_thermal, thermal_timestamps = load_flir_file(thermal_file)
+        un_corr_thermal = np.einsum("hwt -> thw", un_corr_thermal)
+    elif thermal_file.split(".")[-1] == "thermal":
+        with open(thermal_file, 'wb') as inp:
+            thermal_timestamps = pickle.load(inp)
+            un_corr_thermal = pickle.load(inp)
 
     un_corr_thermal_nuc = remove_banding_batch(un_corr_thermal,(0,0),(75,320))
 
@@ -2247,7 +2267,7 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
     for i in range(600):
         thermal[i,:,:] = correct(un_corr_thermal[i,:,:])
         thermal_nuc[i,:,:] = correct(un_corr_thermal_nuc[i,:,:])
-        thermal_nuc[i,:,:] = cv_mine.blur(thermal_nuc[i,:,:],(7,7))
+        thermal_nuc[i,:,:] = cv.blur(thermal_nuc[i,:,:],(7,7))
 
     start = locate_start_thermal(thermal_nuc,xs, ys)
     if (start < start_lower_bound or start > start_upper_bound):
@@ -2293,7 +2313,7 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
         results2 = []
         # 3.0819 optimal scale      
 
-        method = cv_mine.TM_CCOEFF_NORMED
+        method = cv.TM_CCOEFF_NORMED
 
         scaling_factor = 3
 
@@ -2303,10 +2323,10 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
 
             w, h = template.shape[::-1]
             # All the 6 methods for comparison in a list
-            method = cv_mine.TM_CCOEFF_NORMED
+            method = cv.TM_CCOEFF_NORMED
             # Apply template Matching
-            res = cv_mine.matchTemplate(img,template,method)
-            min_val, max_val, min_loc, max_loc = cv_mine.minMaxLoc(res)
+            res = cv.matchTemplate(img,template,method)
+            min_val, max_val, min_loc, max_loc = cv.minMaxLoc(res)
             # If the method is TM_SQDIFF or TM_SQDIFF_NORMED, take minimum
             results.append([max_val,scale])
 
@@ -2315,8 +2335,8 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
         w, h = template.shape[::-1]
 
         # Apply template Matching
-        res = cv_mine.matchTemplate(img,template,method)
-        min_val, max_val, min_loc, max_loc = cv_mine.minMaxLoc(res)
+        res = cv.matchTemplate(img,template,method)
+        min_val, max_val, min_loc, max_loc = cv.minMaxLoc(res)
         # If the method is TM_SQDIFF or TM_SQDIFF_NORMED, take minimum
         top_left = max_loc
         bottom_right = (top_left[0] + w, top_left[1] + h)
@@ -2330,10 +2350,10 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
 
             w, h = template.shape[::-1]
             # All the 6 methods for comparison in a list
-            method = cv_mine.TM_CCOEFF_NORMED
+            method = cv.TM_CCOEFF_NORMED
             # Apply template Matching
-            res = cv_mine.matchTemplate(img2,template,method)
-            min_val, max_val, min_loc, max_loc = cv_mine.minMaxLoc(res)
+            res = cv.matchTemplate(img2,template,method)
+            min_val, max_val, min_loc, max_loc = cv.minMaxLoc(res)
             # If the method is TM_SQDIFF or TM_SQDIFF_NORMED, take minimum
             results2.append([max_val,scale])
 
@@ -2342,8 +2362,8 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
         w, h = template.shape[::-1]
 
         # Apply template Matching
-        res = cv_mine.matchTemplate(img2,template,method)
-        min_val, max_val, min_loc, max_loc = cv_mine.minMaxLoc(res)
+        res = cv.matchTemplate(img2,template,method)
+        min_val, max_val, min_loc, max_loc = cv.minMaxLoc(res)
         # If the method is TM_SQDIFF or TM_SQDIFF_NORMED, take minimum
         top_left = max_loc
         bottom_right = (top_left[0] + w, top_left[1] + h)

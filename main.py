@@ -1,16 +1,19 @@
 import pickle
+import time
 import dearpygui.dearpygui as dpg
 import dearpygui.demo as demo
 import asyncio
 
 import numpy as np
 
-from thermal_functions import get_steady_state_functions, load_thermal_file, load_thermal_and_mic_file, get_size_from_mic_file, extract_gradient_and_temp_timestamped_NUTS, extract_non_max_steady_state_from_diff, calibrate_gradient, calculate_attenuation_mesh, calculate_absorbtion_mesh, press_from_gradient_mesh, press_from_grad_fit, calibrate_steady_state_naive
+from thermal_functions import correct, get_steady_state_functions, load_thermal_file, load_thermal_and_mic_file, get_size_from_mic_file, extract_gradient_and_temp_timestamped_NUTS, extract_non_max_steady_state_from_diff, calibrate_gradient, calculate_attenuation_mesh, calculate_absorbtion_mesh, locate_start_thermal, press_from_gradient_mesh, press_from_grad_fit, calibrate_steady_state_naive, remove_banding_batch
 import copy
 
 import threading
 
-#import flircamera
+import flircamera
+
+import cv2 as cv
 
 # TODO: allow selection of noise-reduction parameters
 
@@ -37,6 +40,7 @@ class DataHolder:
     fit_grad_coeffs = []
     fit_saturation_coeffs = []
     fit_saturation_functions = {}
+    streaming_cutoff = 2.8
 
 
 class MeasurementDataHolder:
@@ -91,9 +95,10 @@ validation_selected_index = 0
 baseline_frame = None
 next_frame_baseline = False
 camera = None
+camera_connected = False
 capturing = False
 recording = False
-recording_frames = []
+recorded_frames = []
 recorded_timestamps = []
 
 dpg.create_context()
@@ -111,6 +116,7 @@ dpg.setup_dearpygui()
 
 dpg.setup_registries()
 
+#dpg.colormap_registry()
 
 def add_tab_thermal_data(sender, app_data, user_data):
 
@@ -427,7 +433,7 @@ def reconvert_gradient(sender, app_data, user_data):
     #data_holder_measurement
     dpg.enable_item("view_converted_data_button")
 
-def reconvert_saturation(sender, app_data, user_data):
+def reconvert_steady_state(sender, app_data, user_data):
     dpg.show_item("load_data_popup2")
 
     dpg.set_value("load_data_loading_bar2", 0)
@@ -863,6 +869,95 @@ def plot_mesh_gradient(sender, app_data, user_data):
     else:
         dpg.add_line_series(x,y,label=f"Physical Model",parent="gradient_y_axis", tag="physical_model_plot")
 
+def change_gradient_coeff(sender, app_data, user_data):
+    a5 = dpg.get_value("gradient_coeff_1")
+    b5 = dpg.get_value("gradient_coeff_2")
+
+    config_holder.fit_grad_coeffs = [config_holder.fit_grad_coeffs[0], a5, b5]
+
+    grad = np.linspace(0,50,200)
+    x = grad.tolist()
+    y = press_from_grad_fit(grad,a5,b5).tolist()
+
+    if dpg.does_item_exist("fit_gradient_plot"):
+        dpg.set_value("fit_gradient_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"Fit Square Root Model",parent="gradient_y_axis", tag="fit_gradient_plot")
+
+def change_saturation_coeff(sender, app_data, user_data):
+    s1 = dpg.get_value("saturation_coeff_1")
+    s2 = dpg.get_value("saturation_coeff_2")
+
+    s3 = dpg.get_value("saturation_coeff_3")
+
+    s4 = dpg.get_value("saturation_coeff_4")
+    s5 = dpg.get_value("saturation_coeff_5")
+    s6 = dpg.get_value("saturation_coeff_6")
+
+    s9 = dpg.get_value("saturation_coeff_9")
+    s10 = dpg.get_value("saturation_coeff_10")
+    s11 = dpg.get_value("saturation_coeff_11")
+
+    s7 = dpg.get_value("saturation_coeff_7")
+    s8 = dpg.get_value("saturation_coeff_8")
+
+    streaming_cutoff = dpg.get_value("streaming_cutoff")
+
+    config_holder.fit_saturation_coeffs = [[s1,s2],[s3],[s4,s5,s6],[s9,s10,s11],[s7,s8]]
+
+    naive, _, quadratic, emission ,emission_streaming, streaming  = get_steady_state_functions(data_holder.fit_saturation_coeffs,streaming_cutoff=streaming_cutoff)
+
+    config_holder.fit_saturation_functions = {"naive": naive, "quadratic": quadratic, "quadratic w/ emission": emission,"quadratic w/ emission & streaming":emission_streaming, "quadratic w/ streaming": streaming}
+
+
+    sat = np.linspace(0.00000001,50,200)
+    x = sat.tolist()
+    y = config_holder.fit_saturation_functions["quadratic w/ emission & streaming"](sat).tolist()
+
+    if dpg.does_item_exist("quad_emiss_stream_plot"):
+        dpg.set_value("quad_emiss_stream_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"quadratic w/ emission & streaming",parent="saturation_y_axis",tag="quad_emiss_stream_plot")
+
+    sat = np.linspace(0.00000001,50,200)
+    x = sat.tolist()
+    y = config_holder.fit_saturation_functions["quadratic w/ streaming"](sat).tolist()
+
+    if dpg.does_item_exist("quad_stream_plot"):
+        dpg.set_value("quad_stream_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"quadratic w/ streaming",parent="saturation_y_axis",tag="quad_stream_plot")
+    pass
+
+def change_streaming_cutoff(sender, app_data, user_data):
+    streaming_cutoff = dpg.get_value("streaming_cutoff")
+    data_holder.streaming_cutoff = streaming_cutoff
+
+    naive, _, quadratic, emission ,emission_streaming, streaming  = get_steady_state_functions(data_holder.fit_saturation_coeffs,streaming_cutoff=streaming_cutoff)
+
+    config_holder.fit_saturation_functions = {"naive": naive, "quadratic": quadratic, "quadratic w/ emission": emission,"quadratic w/ emission & streaming":emission_streaming, "quadratic w/ streaming": streaming}
+
+    dpg.configure_item("saturation_model_selector", items=list(data_holder.fit_saturation_functions.keys()))
+
+    sat = np.linspace(0.00000001,50,200)
+    x = sat.tolist()
+    y = emission_streaming(sat).tolist()
+
+    if dpg.does_item_exist("quad_emiss_stream_plot"):
+        dpg.set_value("quad_emiss_stream_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"quadratic w/ emission & streaming",parent="saturation_y_axis",tag="quad_emiss_stream_plot")
+
+
+    sat = np.linspace(0.00000001,50,200)
+    x = sat.tolist()
+    y = streaming(sat).tolist()
+
+    if dpg.does_item_exist("quad_stream_plot"):
+        dpg.set_value("quad_stream_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"quadratic w/ streaming",parent="saturation_y_axis",tag="quad_stream_plot")
+
 def fit_gradient_and_saturation(sender, app_data, user_data):
     # ok time to fit gradient
     gradients_calib_sorted = [x for _, x in sorted(zip(data_holder.mic_peaks, data_holder.gradients_maxs), key=lambda pair: pair[0])]
@@ -874,6 +969,9 @@ def fit_gradient_and_saturation(sender, app_data, user_data):
     att_coef, a5, b5 = calibrate_gradient(gradients_calib_sorted, pressures_calib_sorted, print_report=False)
 
     data_holder.fit_grad_coeffs = [att_coef, a5, b5]
+
+    dpg.set_value("gradient_coeff_1", a5)
+    dpg.set_value("gradient_coeff_2", b5)
 
     grad = np.linspace(0,50,200)
     x = grad.tolist()
@@ -887,9 +985,27 @@ def fit_gradient_and_saturation(sender, app_data, user_data):
     steady_state_increases_calib_sorted = [x for _, x in sorted(zip(data_holder.mic_peaks, data_holder.saturations_maxs), key=lambda pair: pair[0])]
     steady_state_increases_calib_sorted = np.array(steady_state_increases_calib_sorted)
 
+    streaming_cutoff = dpg.get_value("streaming_cutoff")
 
-    thermal_to_pressure_naive, thermal_to_pressure_quadratic, thermal_to_pressure_quadratic_true, thermal_to_pressure_quadratic_true_emission,thermal_to_pressure_quadratic_true_emission_variable_h, thermal_to_pressure_quadratic_true_variable_h, coeffs  = calibrate_steady_state_naive(steady_state_increases_calib_sorted, pressures_calib_sorted,print_report=False,streaming_cutoff=2.8)
+    thermal_to_pressure_naive, thermal_to_pressure_quadratic, thermal_to_pressure_quadratic_true, thermal_to_pressure_quadratic_true_emission,thermal_to_pressure_quadratic_true_emission_variable_h, thermal_to_pressure_quadratic_true_variable_h, coeffs  = calibrate_steady_state_naive(steady_state_increases_calib_sorted, pressures_calib_sorted,print_report=False,streaming_cutoff=streaming_cutoff)
     data_holder.fit_saturation_coeffs = coeffs
+    
+    dpg.set_value("saturation_coeff_1", coeffs[0][0])
+    dpg.set_value("saturation_coeff_2", coeffs[0][1])
+
+    dpg.set_value("saturation_coeff_3", coeffs[2][1])
+
+    dpg.set_value("saturation_coeff_4", coeffs[3][0])
+    dpg.set_value("saturation_coeff_5", coeffs[3][1])
+    dpg.set_value("saturation_coeff_6", coeffs[3][2])
+
+    dpg.set_value("saturation_coeff_9", coeffs[4][0])
+    dpg.set_value("saturation_coeff_10", coeffs[4][1])
+    dpg.set_value("saturation_coeff_11", coeffs[4][2])
+
+    dpg.set_value("saturation_coeff_7", coeffs[5][0])
+    dpg.set_value("saturation_coeff_8", coeffs[5][1])
+
     data_holder.fit_saturation_functions = {"naive": thermal_to_pressure_naive, "quadratic": thermal_to_pressure_quadratic_true, "quadratic w/ emission": thermal_to_pressure_quadratic_true_emission,"quadratic w/ emission & streaming":thermal_to_pressure_quadratic_true_emission_variable_h, "quadratic w/ streaming": thermal_to_pressure_quadratic_true_variable_h}
 
     dpg.configure_item("saturation_model_selector", items=list(data_holder.fit_saturation_functions.keys()))
@@ -985,79 +1101,78 @@ def add_mic_files(sender, app_data, user_data):
 
     dpg.configure_item(str(tab)+"_list_box_mic2",items=list(app_data["selections"].values()))
 
-dpg.colormap_registry()
 
-#camera = flircamera.SingleCamera(config='highspeed.json', share=False)
-#camera.begin_acquisition('test.avi', record_kws=dict(bitrate=1e6))
-#for k in range(200*60*5):
-#    im = camera.get_frame()
-#camera.end_acquisition()
-#camera.finalize()
 
 def connect_thermal_camera(sender, app_data, user_data):
-    # global camera
-    # camera = flircamera.CameraManager()
-    # camera.get_camera()
-    # camera.setup_camera()
+    global camera
+    global camera_connected
+    if camera == None:
+        camera = flircamera.CameraManager()
+    camera.get_camera()
+    camera.setup_camera()
+    camera_connected = True
     dpg.enable_item("live_convert_button")
     dpg.disable_item("connect_camera_button")
     dpg.enable_item("disconnect_camera_button")
     dpg.set_value("camera_status_text", "Camera Connected")
 
 def disconnect_thermal_camera(sender, app_data, user_data):
-    # global camera
-    # global capturing
-    # camera.release_camera(acquisition_status=True)
-    # capturing = False
-    dpg.disable_item("live_convert_button")
-    dpg.enable_item("connect_camera_button")
-    dpg.disable_item("disconnect_camera_button")
-    dpg.set_value("camera_status_text", "No Camera Connected")
+    global camera
+    global capturing
+    global camera_connected
+    if camera_connected:
+        camera.release_camera(acquisition_status=True)
+        capturing = False
+        camera_connected = False
+        dpg.disable_item("live_convert_button")
+        dpg.enable_item("connect_camera_button")
+        dpg.disable_item("disconnect_camera_button")
+        dpg.set_value("camera_status_text", "No Camera Connected")
 
 def live_camera_capture(sender, app_data, user_data):
     global next_frame_baseline
-    # global camera
-    # global capturing
-    # global baseline_frame
-    # camera.begin_acquisition()
-    # capturing = True
+    global camera
+    global capturing
+    global baseline_frame
+    camera.begin_acquisition()
+    capturing = True
 
-    # frame, frame_status = camera.capture_frame()
+    frame, frame_status = camera.capture_frame()
 
-    # if next_frame_baseline:
-    #     baseline_frame = copy.deepcopy(frame)
-    #     next_frame_baseline = False
+    if next_frame_baseline:
+        baseline_frame = copy.deepcopy(frame)
+        next_frame_baseline = False
 
-    # print(frame_status)
+    print(frame_status)
 
-    # data = frame
+    data = frame
 
-    # if dpg.does_item_exist("camera_data_plot"):
-    #     dpg.set_value("camera_data_plot", [data]) 
-    #     dpg.configure_item("camera_data_plot",cols=data.shape[1],rows=data.shape[0],scale_min=np.min(data),scale_max=np.max(data))
-    #     dpg.configure_item("camera_data_legend",min_scale=np.min(data),max_scale=np.max(data))
-    # else:
-    #     dpg.add_heat_series(data,cols=data.shape[1],rows=data.shape[0], parent="camera_y_axis",scale_min=np.min(data),scale_max=np.max(data),format="",tag="camera_data_plot")
-    #     dpg.bind_colormap("camera_data_heat", dpg.mvPlotColormap_Plasma)
-    #     dpg.configure_item("camera_data_legend",min_scale=np.min(data),max_scale=np.max(data))
+    if dpg.does_item_exist("camera_data_plot"):
+        dpg.set_value("camera_data_plot", [data]) 
+        dpg.configure_item("camera_data_plot",cols=data.shape[1],rows=data.shape[0],scale_min=np.min(data),scale_max=np.max(data))
+        dpg.configure_item("camera_data_legend",min_scale=np.min(data),max_scale=np.max(data))
+    else:
+        dpg.add_heat_series(data,cols=data.shape[1],rows=data.shape[0], parent="camera_y_axis",scale_min=np.min(data),scale_max=np.max(data),format="",tag="camera_data_plot")
+        dpg.bind_colormap("camera_data_heat", dpg.mvPlotColormap_Plasma)
+        dpg.configure_item("camera_data_legend",min_scale=np.min(data),max_scale=np.max(data))
 
-    # dpg.set_item_width("camera_data_heat",int( dpg.get_item_height("camera_data_heat") * (data.shape[1]/data.shape[0])))
-    # if baseline_frame != None
-    #     saturations = frame - baseline_frame
-    #     saturations[saturations <= 0] = 0.0000000000000001
+    dpg.set_item_width("camera_data_heat",int( dpg.get_item_height("camera_data_heat") * (data.shape[1]/data.shape[0])))
+    if baseline_frame != None:
+        saturations = frame - baseline_frame
+        saturations[saturations <= 0] = 0.0000000000000001
 
-    #     # convert gradients to pressure
-    #     # TODO: CHOOSE CONVERSION MODE
-    #     data = config_holder.fit_saturation_functions[dpg.get_value("inference_saturation_model_selector")](saturations)
+        # convert gradients to pressure
+        # TODO: CHOOSE CONVERSION MODE
+        data = config_holder.fit_saturation_functions[dpg.get_value("inference_saturation_model_selector")](saturations)
 
-    #     if dpg.does_item_exist("camera_conv"):
-    #         dpg.set_value("camera_conv", [data])
-    #         dpg.configure_item("camera_conv",cols=data.shape[1],rows=data.shape[0],scale_min=np.min(data),scale_max=np.max(data))
-    #         dpg.configure_item("camera_conv_legend",min_scale=np.min(data),max_scale=np.max(data))
-    #     else:
-    #         dpg.add_heat_series(data,cols=data.shape[1],rows=data.shape[0], parent="camera_conv_y_axis",scale_min=np.min(data),scale_max=np.max(data),format="",tag="camera_conv_plot")
-    #         dpg.bind_colormap("camera_conv_heat", dpg.mvPlotColormap_Plasma)
-    #         dpg.configure_item("camera_conv_legend",min_scale=np.min(data),max_scale=np.max(data))
+        if dpg.does_item_exist("camera_conv"):
+            dpg.set_value("camera_conv", [data])
+            dpg.configure_item("camera_conv",cols=data.shape[1],rows=data.shape[0],scale_min=np.min(data),scale_max=np.max(data))
+            dpg.configure_item("camera_conv_legend",min_scale=np.min(data),max_scale=np.max(data))
+        else:
+            dpg.add_heat_series(data,cols=data.shape[1],rows=data.shape[0], parent="camera_conv_y_axis",scale_min=np.min(data),scale_max=np.max(data),format="",tag="camera_conv_plot")
+            dpg.bind_colormap("camera_conv_heat", dpg.mvPlotColormap_Plasma)
+            dpg.configure_item("camera_conv_legend",min_scale=np.min(data),max_scale=np.max(data))
 
     dpg.show_item("view_camera_popup")
 
@@ -1066,7 +1181,6 @@ def camera_hovered(sender, app_data, user_data):
     mouse_pos = dpg.get_plot_mouse_pos()
     # mouse pos is from 0 to 1 in both axis, 1,1 is top right, 0,0 is bottom left
     data = dpg.get_value("camera_data_plot")
-    #data = np.array(dpg.get_value("camera_data_plot"))
     plot_config = dpg.get_item_configuration("camera_data_plot")
 
     height = plot_config["rows"]
@@ -1158,9 +1272,91 @@ def set_recording_flag(sender, app_data, user_data):
         recording = True
         dpg.configure_item("camera_record_button", label="Stop Recording")
     else:
-        # TODO: actually save the recording
+
+        # put data into storage
+
+        if xs == None or ys == None: #TODO: allow choosing crop
+            # fill in xs and ys with the whole size
+            xs = [0,-1]
+            ys = [0,-1]
+
+        un_corr_thermal_nuc = remove_banding_batch(recorded_frames,(0,0),(75,320))
+
+        thermal_corrected = correct(recorded_frames[0,:,:])
+        thermal_corrected_nuc = correct(un_corr_thermal_nuc[0,:,:])
+
+        thermal = np.zeros((len(recorded_timestamps),thermal_corrected.shape[0],thermal_corrected.shape[1]))
+        thermal_nuc = np.zeros((len(recorded_timestamps),thermal_corrected_nuc.shape[0],thermal_corrected_nuc.shape[1]))
+
+        for i in range(len(recorded_timestamps)):
+            thermal[i,:,:] = correct(recorded_frames[i,:,:])
+            thermal_nuc[i,:,:] = correct(un_corr_thermal_nuc[i,:,:])
+            thermal_nuc[i,:,:] = cv.blur(thermal_nuc[i,:,:],(7,7))
+
+        recorded_frames_nr = None #TODO: add noise reduction to camera
+        detected_start = locate_start_thermal(recorded_frames_nr,xs, ys)
+        file_name = recorded_timestamps[0].strftime("%Y-%m-%d_%H-%M-%S") + ".thermal"
+        ambient = ambient = np.percentile(recorded_frames[0],10)
+
+
+        data_holder_measurement.timestamps.append(recorded_timestamps)
+        data_holder_measurement.start_indices.append(detected_start)
+        data_holder_measurement.ambients.append(ambient)
+        data_holder_measurement.thermals.append(thermal)
+        data_holder_measurement.thermals_nr.append(thermal_nuc)
+        data_holder_measurement.name.append(file_name)
+
+        data_holder_measurement.gradients.append(None)
+        data_holder_measurement.gradients_maxs.append(None)
+        data_holder_measurement.gradients_temp.append(None)
+        data_holder_measurement.saturations.append(None)
+        data_holder_measurement.saturations_maxs.append(None)
+        data_holder_measurement.pressures_saturations.append(None)
+        data_holder_measurement.pressures_gradient.append(None)
+        data_holder_measurement.converted_indices.append(None)
+
+        dpg.enable_item("convert_data_button")
+        dpg.enable_item("convert_all_data_button")
+
+        new_files = dpg.get_item_configuration("list_box_measurement")['items'] + file_name
+        dpg.configure_item("list_box_measurement",items=new_files)
+
         recording = False
         dpg.configure_item("camera_record_button", label="Start Recording")
+
+def save_recording(sender, app_data, user_data):
+    file_names = list(app_data["selections"].keys())
+    file_name = file_names[0] # maybe not needed?
+
+    if file_name == "":
+        return
+
+    if not file_name.endswith(".thermal"):
+        file_name += ".thermal"
+
+    with open(file_name, 'wb') as out:
+        pickle.dump(recorded_timestamps, out,-1)
+        pickle.dump(recorded_frames, out,-1)
+
+    return
+
+
+def save_selected_recording(sender, app_data, user_data):
+    file_names = list(app_data["selections"].keys())
+    file_name = file_names[0] # maybe not needed?
+
+    if file_name == "":
+        return
+
+    if not file_name.endswith(".thermal"):
+        file_name += ".thermal"
+
+    index = dpg.get_item_configuration("list_box_measurement")["items"].index(dpg.get_value("list_box_measurement"))
+
+    with open(file_name, 'wb') as out:
+        pickle.dump(data_holder_measurement.timestamps[index], out,-1)
+        pickle.dump(data_holder_measurement.thermals[index], out,-1)
+    return
 
 with dpg.window(label="Example Window", tag="Primary Window"):
     with dpg.tab_bar():
@@ -1186,6 +1382,11 @@ with dpg.window(label="Example Window", tag="Primary Window"):
                     dpg.add_loading_indicator(style=1,radius=1.25)#1.25
 
             with dpg.window(tag="view_camera_popup",modal=False,show=False,width=1400,height=900,pos=[0,0],label="Camera Live Feed"):
+                
+                with dpg.file_dialog(label="Choose where to save recording", width=1000, height=800, show=False, callback=save_recording,file_count=1, tag="save_recording_window", modal=True):
+                    dpg.add_file_extension(".thermal",color=(0,153,0, 255))
+                    dpg.add_file_extension("", custom_text="[Directory]", color=(255, 150, 150, 255))
+
                 with dpg.group(horizontal=True):
                     with dpg.plot(label="Raw Thermal Video", tag="camera_data_heat",height=400,width=800,anti_aliased=False):
                         #dpg.add_plot_legend(location=dpg.mvPlot_Location_SouthEast)
@@ -1209,6 +1410,7 @@ with dpg.window(label="Example Window", tag="Primary Window"):
                     with dpg.group(horizontal=True):
                         dpg.add_button(label="Record Baseline/Ambient Frame", callback=set_baseline_frame_flag)
                         dpg.add_button(label="Start Recording",tag="camera_record_button", callback=set_recording_flag)
+                        dpg.add_button(label="Save Last Recording",tag="camera_save_button", callback=lambda s, a, u : dpg.show_item("save_recording_window"))
                     dpg.bind_item_handler_registry("camera_data_heat", "widget_handler")
 
             with dpg.file_dialog(label="Choose config file", width=1000, height=800, show=False, callback=load_calibration_file,file_count=1, tag="config_selector_window", modal=True) as config_selector:
@@ -1234,6 +1436,7 @@ with dpg.window(label="Example Window", tag="Primary Window"):
 
             with dpg.file_dialog(label="Choose Thermal Files", modal=True, width=1000, height=800, show=False, callback=lambda s, a, u : load_thermal_files(list(a["selections"].values()))) as fd3:
                 dpg.add_file_extension(".seq",color=(0,153,0, 255))
+                dpg.add_file_extension(".thermal",color=(0,153,153, 255))
                 dpg.add_file_extension("", custom_text="[Directory]", color=(255, 150, 150, 255))
 
             with dpg.group(horizontal=True):
@@ -1242,9 +1445,15 @@ with dpg.window(label="Example Window", tag="Primary Window"):
                 dpg.add_button(label="Load Data From File",user_data=fd3, callback=lambda s, a, u: dpg.configure_item(u, show=True))
             dpg.add_text("Data currently recorded/loaded:")
             measurement_files = dpg.add_listbox(tag="list_box_measurement")
+
+            with dpg.file_dialog(label="Choose where to save recording", width=1000, height=800, show=False, callback=save_selected_recording,file_count=1, tag="save_recording_selected_window", modal=True):
+                dpg.add_file_extension(".thermal",color=(0,153,0, 255))
+                dpg.add_file_extension("", custom_text="[Directory]", color=(255, 150, 150, 255))
+
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Convert All Data", enabled=False, tag="convert_all_data_button", callback=convert_all_measurement_data)
                 dpg.add_button(label="Convert Selected Data", enabled=False, tag="convert_data_button", callback=convert_measurement_data)
+                dpg.add_button(label="Save Selected Data", enabled=True, tag="save_data_button", callback=lambda s, a, u : dpg.show_item("save_recording_selected_window"))
                 dpg.add_button(label="Live-Convert from Camera using steady state",enabled=False,tag="live_convert_button",callback=live_camera_capture)
             dpg.add_text("Data Currently Converted:")
             dpg.add_listbox(tag="list_box_measurement_converted")
@@ -1263,11 +1472,6 @@ with dpg.window(label="Example Window", tag="Primary Window"):
                     dpg.add_plot_axis(dpg.mvYAxis, tag="converted_steady_y_axis",no_tick_labels=False)
                 dpg.add_colormap_scale(min_scale=0,max_scale=1,tag="converted_data_steady_legend",height=800,colormap=dpg.mvPlotColormap_Plasma)
 
-
-
-
-
-
         with dpg.tab(label="Training", tag="loading_tab"):
 
             with dpg.collapsing_header(label="Select and Group Data Files"):
@@ -1276,6 +1480,7 @@ with dpg.window(label="Example Window", tag="Primary Window"):
                         with dpg.file_dialog(label="Choose Thermal Files", modal=True, width=1000, height=800, show=False, callback=add_thermal_files) as fd:
                         #with dpg.file_dialog(label="Choose Thermal Files", width=300, height=400, show=False, callback=lambda s, a, u : print(a), tag="training_file_dialog") as fd:
                             dpg.add_file_extension(".seq",color=(0,153,0, 255))
+                            dpg.add_file_extension(".thermal",color=(0,153,153, 255))
                             dpg.add_file_extension("", custom_text="[Directory]", color=(255, 150, 150, 255))
 
                         with dpg.file_dialog(label="Choose Microphone Files", modal=True, width=1000, height=800, show=False, callback=add_mic_files) as fd2:
@@ -1321,6 +1526,48 @@ with dpg.window(label="Example Window", tag="Primary Window"):
             Gradient_text = dpg.add_text("No Gradients or Steady States extracted")
             extract_gradient_button = dpg.add_button(label="Extract Gradients and Steady States", callback=extract_gradients_and_saturations,enabled=False)
             fit_gradient_button = dpg.add_button(label="Fit Models", callback=fit_gradient_and_saturation,enabled=False)
+            with dpg.collapsing_header(label="Change Model Coefficients"):
+                with dpg.group(indent=10):
+                    dpg.add_text("Gradient Model Coefficients:")
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_double(tag="gradient_coeff_1",label="Multiplicative Coefficient", format="%.2f", default_value=548.42,width=150,callback=change_gradient_coeff)
+                        dpg.add_input_double(tag="gradient_coeff_2",label="Power Coefficient", format="%.2f", default_value=0.5,width=150,callback=change_gradient_coeff)
+
+                    dpg.add_separator()
+
+                    dpg.add_text("Steady State Model Coefficients")
+
+                    dpg.add_input_double(tag="saturation_streaming_cutoff",label="Streaming Start (m/s)", format="%.2f", default_value=2.8,width=150,callback=change_streaming_cutoff)
+
+                    dpg.add_text("power law:")
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_double(tag="saturation_coeff_1",label="Multiplicative Coefficient", format="%.2f", default_value=100,width=150,callback=change_saturation_coeff)
+                        dpg.add_input_double(tag="saturation_coeff_2",label="Power Coefficient", format="%.2f", default_value=0.5,width=150,callback=change_saturation_coeff)
+
+                    dpg.add_text("quadratic:")
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_double(tag="saturation_coeff_3",label="Multiplicative Coefficient", format="%.2f", default_value=100,width=150,callback=change_saturation_coeff)
+
+                    dpg.add_text("quadratic w/ emission:")
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_double(tag="saturation_coeff_4",label="Overall Coefficient", format="%.2f", default_value=100,width=150,callback=change_saturation_coeff)
+                        dpg.add_input_double(tag="saturation_coeff_5",label="Linear Coefficient", format="%.2f", default_value=0.5,width=150,callback=change_saturation_coeff)
+                        dpg.add_input_double(tag="saturation_coeff_6",label="Emission Coefficient", format="%.2f", default_value=0.5,width=150,callback=change_saturation_coeff)
+
+                    dpg.add_text("quadratic w/ streaming:")
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_double(tag="saturation_coeff_7",label="Overall Coefficient", format="%.2f", default_value=100,width=150,callback=change_saturation_coeff)
+                        dpg.add_input_double(tag="saturation_coeff_8",label="Linear Coefficient", format="%.2f", default_value=0.5,width=150,callback=change_saturation_coeff)
+
+                    dpg.add_text("quadratic w/ streaming & emission:")
+                    with dpg.group(horizontal=True):
+                        dpg.add_input_double(tag="saturation_coeff_9",label="Overall Coefficient", format="%.2f", default_value=100,width=150,callback=change_saturation_coeff)
+                        dpg.add_input_double(tag="saturation_coeff_10",label="Linear Coefficient", format="%.2f", default_value=0.5,width=150,callback=change_saturation_coeff)
+                        dpg.add_input_double(tag="saturation_coeff_11",label="Emission Coefficient", format="%.2f", default_value=0.5,width=150,callback=change_saturation_coeff)
+
+
+
+
 
             with dpg.group(horizontal=True):
                 with dpg.plot(label="Gradient scatter plot", tag="gradient_scatter_plot",height=400,width=800,anti_aliased=True):
@@ -1479,39 +1726,43 @@ demo.show_demo()
 while(dpg.is_dearpygui_running()):
     dpg.render_dearpygui_frame()  
 
-    # if capturing:
-    #     frame, frame_status = camera.capture_frame()
+    if capturing:
+        frame, frame_status = camera.capture_frame()
 
-    #     if next_frame_baseline:
-    #         baseline_frame = copy.deepcopy(frame)
-    #         next_frame_baseline = False
+        if recording:
+            recorded_frames.append(frame)
+            recorded_timestamps.append(time.time())
 
-    #     data = frame
+        if next_frame_baseline:
+            baseline_frame = copy.deepcopy(frame)
+            next_frame_baseline = False
 
-    #     if dpg.does_item_exist("camera_data_plot"):
-    #         dpg.set_value("camera_data_plot", [data]) 
-    #         dpg.configure_item("camera_data_plot",cols=data.shape[1],rows=data.shape[0],scale_min=np.min(data),scale_max=np.max(data))
-    #         dpg.configure_item("camera_data_legend",min_scale=np.min(data),max_scale=np.max(data))
-    #     else:
-    #         dpg.add_heat_series(data,cols=data.shape[1],rows=data.shape[0], parent="camera_y_axis",scale_min=np.min(data),scale_max=np.max(data),format="",tag="camera_data_plot")
-    #         dpg.bind_colormap("camera_data_heat", dpg.mvPlotColormap_Plasma)
-    #         dpg.configure_item("camera_data_legend",min_scale=np.min(data),max_scale=np.max(data))
-    #     if baseline_frame != None:
-    #         saturations = frame - baseline_frame
-    #         saturations[saturations <= 0] = 0.0000000000000001
+        data = frame
 
-    #         # convert gradients to pressure
-    #         # TODO: CHOOSE CONVERSION MODE
-    #         data = config_holder.fit_saturation_functions[dpg.get_value("inference_saturation_model_selector")](saturations)
+        if dpg.does_item_exist("camera_data_plot"):
+            dpg.set_value("camera_data_plot", [data]) 
+            dpg.configure_item("camera_data_plot",cols=data.shape[1],rows=data.shape[0],scale_min=np.min(data),scale_max=np.max(data))
+            dpg.configure_item("camera_data_legend",min_scale=np.min(data),max_scale=np.max(data))
+        else:
+            dpg.add_heat_series(data,cols=data.shape[1],rows=data.shape[0], parent="camera_y_axis",scale_min=np.min(data),scale_max=np.max(data),format="",tag="camera_data_plot")
+            dpg.bind_colormap("camera_data_heat", dpg.mvPlotColormap_Plasma)
+            dpg.configure_item("camera_data_legend",min_scale=np.min(data),max_scale=np.max(data))
+        if baseline_frame != None:
+            saturations = frame - baseline_frame
+            saturations[saturations <= 0] = 0.0000000000000001
 
-    #         if dpg.does_item_exist("camera_conv"):
-    #             dpg.set_value("camera_conv", [data])
-    #             dpg.configure_item("camera_conv",cols=data.shape[1],rows=data.shape[0],scale_min=np.min(data),scale_max=np.max(data))
-    #             dpg.configure_item("camera_conv_legend",min_scale=np.min(data),max_scale=np.max(data))
-    #         else:
-    #             dpg.add_heat_series(data,cols=data.shape[1],rows=data.shape[0], parent="camera_conv_y_axis",scale_min=np.min(data),scale_max=np.max(data),format="",tag="camera_conv_plot")
-    #             dpg.bind_colormap("camera_conv_heat", dpg.mvPlotColormap_Plasma)
-    #             dpg.configure_item("camera_conv_legend",min_scale=np.min(data),max_scale=np.max(data))
+            # convert gradients to pressure
+            # TODO: CHOOSE CONVERSION MODE
+            data = config_holder.fit_saturation_functions[dpg.get_value("inference_saturation_model_selector")](saturations)
+
+            if dpg.does_item_exist("camera_conv"):
+                dpg.set_value("camera_conv", [data])
+                dpg.configure_item("camera_conv",cols=data.shape[1],rows=data.shape[0],scale_min=np.min(data),scale_max=np.max(data))
+                dpg.configure_item("camera_conv_legend",min_scale=np.min(data),max_scale=np.max(data))
+            else:
+                dpg.add_heat_series(data,cols=data.shape[1],rows=data.shape[0], parent="camera_conv_y_axis",scale_min=np.min(data),scale_max=np.max(data),format="",tag="camera_conv_plot")
+                dpg.bind_colormap("camera_conv_heat", dpg.mvPlotColormap_Plasma)
+                dpg.configure_item("camera_conv_legend",min_scale=np.min(data),max_scale=np.max(data))
 
 
 disconnect_thermal_camera(None,None,None)
