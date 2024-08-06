@@ -6,12 +6,17 @@ import asyncio
 
 import numpy as np
 
-from thermal_functions import correct, get_steady_state_functions, load_thermal_file, load_thermal_and_mic_file, get_size_from_mic_file, extract_gradient_and_temp_timestamped_NUTS, extract_non_max_steady_state_from_diff, calibrate_gradient, calculate_attenuation_mesh, calculate_absorbtion_mesh, locate_start_thermal, press_from_gradient_mesh, press_from_grad_fit, calibrate_steady_state_naive, remove_banding_batch
+from thermal_functions import calculate_errors, correct, extract_gradient_timestamped, get_steady_state_functions, heat_soak_model, load_thermal_file, load_thermal_and_mic_file, get_size_from_mic_file, extract_gradient_and_temp_timestamped_NUTS, extract_non_max_steady_state_from_diff, calibrate_gradient, calculate_attenuation_mesh, calculate_absorbtion_mesh, locate_start_thermal, press_from_gradient_mesh, press_from_grad_fit, calibrate_steady_state_naive, remove_banding_batch
 import copy
+
+from skimage.metrics import structural_similarity as ssim
 
 import threading
 
-import flircamera
+try:
+    import flircamera
+except:
+    import flircamera_mock
 
 import cv2 as cv
 
@@ -67,6 +72,7 @@ class ConfigHolder:
     fit_grad_coeffs = []
     fit_saturation_coeffs = []
     fit_saturation_functions = {}
+    streaming_cutoff = []
 
     attenuation = 0
     absorbtion = 0
@@ -175,6 +181,20 @@ def view_converted_measurement(sender, app_data, user_data):
         dpg.configure_item("converted_data_steady_legend",min_scale=0,max_scale=np.max(data))
 
     dpg.set_item_width("converted_data_steady_heat",int(dpg.get_item_height("converted_data_steady_heat")* (data.shape[1]/data.shape[0])))
+
+def save_converted_measurement(sender, app_data, user_data):
+    selected_file_index = dpg.get_item_configuration("list_box_measurement_converted")["items"].index(dpg.get_value("list_box_measurement_converted"))
+
+    if selected_file_index not in data_holder_measurement.converted_indices:
+        return
+    
+    pressure_from_grad = data_holder_measurement.pressures_gradient[selected_file_index]
+
+    pressure_from_saturation = data_holder_measurement.pressures_saturations[selected_file_index]
+
+    with open(f"converted_data_{selected_file_index}.pkl", "wb") as f:
+        pickle.dump(pressure_from_grad, f)
+        pickle.dump(pressure_from_saturation, f)
 
 
 def view_thermal_measurement_validataion(sender, app_data, user_data):
@@ -286,6 +306,9 @@ def view_thermal_measurement_validataion(sender, app_data, user_data):
 
     data = gradient_pressure - data_holder.mic_values[index]
 
+    ssim = ssim(gradient_pressure, data_holder.mic_values[index], data_range=np.max([data_holder.mic_values[index],gradient_pressure]))
+    dpg.set_value("validation_gradient_ssim_text", f"SSIM: {ssim}")
+
     error_bound = np.max(np.abs(data))
 
     if dpg.does_item_exist("validation_error_plot"):
@@ -301,6 +324,9 @@ def view_thermal_measurement_validataion(sender, app_data, user_data):
 
 
     data = saturation_pressure - data_holder.mic_values[index]
+
+    ssim = ssim(saturation_pressure, data_holder.mic_values[index], data_range=np.max([data_holder.mic_values[index],saturation_pressure]))
+    dpg.set_value("validation_saturation_ssim_text", f"SSIM: {ssim}")
 
     error_bound = np.max(np.abs(data))
 
@@ -319,7 +345,33 @@ def view_thermal_measurement_validataion(sender, app_data, user_data):
 
 def update_validation_saturation_model(sender, app_data, user_data):
     global validation_selected_index
+
+    noise_reduction = dpg.get_value("validation_sat_noise_reduction_checkbox")
+
+    if user_data == "recalculate_saturations":
+        data_holder.saturations = []
+
+        for index, thermal in enumerate(data_holder.thermals_s):
+
+            if noise_reduction:
+                data = data_holder.thermals_s_nr[index]
+            else:
+                data = data_holder.thermals_s[index]
+
+            sats = extract_non_max_steady_state_from_diff(data)
+            data_holder.saturations.append(sats)
+
+    soak = dpg.get_value("validation_sat_soak_checkbox")
+    gauss = dpg.get_value("validation_sat_gauss_checkbox")
+
     saturations = data_holder.saturations[validation_selected_index]
+
+    if soak:
+        saturations = heat_soak_model(saturations)
+
+    if gauss:
+        saturations = saturations #TODO: add gaussian filter
+
     saturations[saturations <= 0] = 0.0000000000000001
 
     # convert gradients to pressure
@@ -339,6 +391,9 @@ def update_validation_saturation_model(sender, app_data, user_data):
 
     data = saturation_pressure - data_holder.mic_values[validation_selected_index]
 
+    ssim = ssim(saturation_pressure, data_holder.mic_values[validation_selected_index], data_range=np.max([data_holder.mic_values[validation_selected_index],saturation_pressure]))
+    dpg.set_value("validation_saturation_ssim_text", f"SSIM: {ssim}")
+
     error_bound = np.max(np.abs(data))
 
     if dpg.does_item_exist("validation_error_plot2"):
@@ -352,7 +407,44 @@ def update_validation_saturation_model(sender, app_data, user_data):
 
 def update_validation_gradient_model(sender, app_data, user_data): 
     global validation_selected_index
+
+    noise_reduction = dpg.get_value("validation_noise_reduction_checkbox")
+    nuts = dpg.get_value("validation_nuts_checkbox")
+    gauss = dpg.get_value("validation_gauss_checkbox")
+    soak = dpg.get_value("validation_soak_checkbox")
+
+    if user_data == "recalculate_gradients":
+
+        cutoffs = [1,5,12.5,15,25]
+        samples = [10,9,8,6,5,4]
+
+        data_holder.gradients = []
+        data_holder.gradients_temp = []
+        data_holder.gradients_maxs = []
+
+        for index, thermal in enumerate(data_holder.thermals_g):
+
+            if noise_reduction:
+                data = data_holder.thermals_g_nr[index]
+            else:
+                data = data_holder.thermals_g[index]
+            if nuts:
+                grad, temp = extract_gradient_and_temp_timestamped_NUTS(data, data_holder.timestamps[index], data_holder.start_indices[index], cutoffs=cutoffs, samples=samples)
+            else:
+                grad = extract_gradient_timestamped(data, data_holder.timestamps[index], 10,data[0,:,:].shape)
+                temp = data[data_holder.start_indices[index] + 10] - data[data_holder.start_indices[index]] 
+            data_holder.gradients.append(grad)
+            data_holder.gradients_temp.append(temp)
+            data_holder.gradients_maxs.append(np.max(grad))
+
     gradients = data_holder.gradients[validation_selected_index]
+
+    if soak:
+        gradients = heat_soak_model(gradients)
+
+    if gauss:
+        gradients = gradients #TODO: add gaussian filter
+
     gradients[gradients <= 0] = 0.0000000000000001
 
     # convert gradients to pressure
@@ -374,6 +466,9 @@ def update_validation_gradient_model(sender, app_data, user_data):
         dpg.configure_item("validation_grad_legend",min_scale=np.min(data),max_scale=np.max(data))
 
     data = gradient_pressure - data_holder.mic_values[validation_selected_index]
+
+    ssim = ssim(gradient_pressure, data_holder.mic_values[validation_selected_index], data_range=np.max([data_holder.mic_values[validation_selected_index],gradient_pressure]))
+    dpg.set_value("validation_gradient_ssim_text", f"SSIM: {ssim}")
 
     error_bound = np.max(np.abs(data))
 
@@ -873,7 +968,7 @@ def change_gradient_coeff(sender, app_data, user_data):
     a5 = dpg.get_value("gradient_coeff_1")
     b5 = dpg.get_value("gradient_coeff_2")
 
-    config_holder.fit_grad_coeffs = [config_holder.fit_grad_coeffs[0], a5, b5]
+    data_holder.fit_grad_coeffs = [data_holder.fit_grad_coeffs[0], a5, b5]
 
     grad = np.linspace(0,50,200)
     x = grad.tolist()
@@ -901,41 +996,72 @@ def change_saturation_coeff(sender, app_data, user_data):
     s7 = dpg.get_value("saturation_coeff_7")
     s8 = dpg.get_value("saturation_coeff_8")
 
-    streaming_cutoff = dpg.get_value("streaming_cutoff")
+    streaming_cutoff = dpg.get_value("saturation_streaming_cutoff")
 
-    config_holder.fit_saturation_coeffs = [[s1,s2],[s3],[s4,s5,s6],[s9,s10,s11],[s7,s8]]
+    data_holder.streaming_cutoff = streaming_cutoff
+
+    data_holder.fit_saturation_coeffs = [[s1,s2],[s3],[s4,s5,s6],[s9,s10,s11],[s7,s8]]
 
     naive, _, quadratic, emission ,emission_streaming, streaming  = get_steady_state_functions(data_holder.fit_saturation_coeffs,streaming_cutoff=streaming_cutoff)
 
-    config_holder.fit_saturation_functions = {"naive": naive, "quadratic": quadratic, "quadratic w/ emission": emission,"quadratic w/ emission & streaming":emission_streaming, "quadratic w/ streaming": streaming}
+    data_holder.fit_saturation_functions = {"naive": naive, "quadratic": quadratic, "quadratic w/ emission": emission,"quadratic w/ emission & streaming":emission_streaming, "quadratic w/ streaming": streaming}
 
 
     sat = np.linspace(0.00000001,50,200)
     x = sat.tolist()
-    y = config_holder.fit_saturation_functions["quadratic w/ emission & streaming"](sat).tolist()
+    y = emission_streaming(sat).tolist()
 
     if dpg.does_item_exist("quad_emiss_stream_plot"):
         dpg.set_value("quad_emiss_stream_plot", [x,y])
     else:
         dpg.add_line_series(x,y,label=f"quadratic w/ emission & streaming",parent="saturation_y_axis",tag="quad_emiss_stream_plot")
 
+
     sat = np.linspace(0.00000001,50,200)
     x = sat.tolist()
-    y = config_holder.fit_saturation_functions["quadratic w/ streaming"](sat).tolist()
+    y = emission(sat).tolist()
+
+    if dpg.does_item_exist("quad_emiss_plot"):
+        dpg.set_value("quad_emiss_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"quadratic w/ emission",parent="saturation_y_axis",tag="quad_emiss_plot")
+
+
+    sat = np.linspace(0.00000001,50,200)
+    x = sat.tolist()
+    y = streaming(sat).tolist()
 
     if dpg.does_item_exist("quad_stream_plot"):
         dpg.set_value("quad_stream_plot", [x,y])
     else:
         dpg.add_line_series(x,y,label=f"quadratic w/ streaming",parent="saturation_y_axis",tag="quad_stream_plot")
-    pass
+
+
+    sat = np.linspace(0.00000001,50,200)
+    x = sat.tolist()
+    y = quadratic(sat).tolist()
+
+    if dpg.does_item_exist("quad_plot"):
+        dpg.set_value("quad_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"quadratic",parent="saturation_y_axis",tag="quad_plot")
+
+    sat = np.linspace(0.00000001,50,200)
+    x = sat.tolist()
+    y = naive(sat).tolist()
+
+    if dpg.does_item_exist("power_plot"):
+        dpg.set_value("power_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"power",parent="saturation_y_axis",tag="power_plot")
 
 def change_streaming_cutoff(sender, app_data, user_data):
-    streaming_cutoff = dpg.get_value("streaming_cutoff")
+    streaming_cutoff = dpg.get_value("saturation_streaming_cutoff")
     data_holder.streaming_cutoff = streaming_cutoff
 
     naive, _, quadratic, emission ,emission_streaming, streaming  = get_steady_state_functions(data_holder.fit_saturation_coeffs,streaming_cutoff=streaming_cutoff)
 
-    config_holder.fit_saturation_functions = {"naive": naive, "quadratic": quadratic, "quadratic w/ emission": emission,"quadratic w/ emission & streaming":emission_streaming, "quadratic w/ streaming": streaming}
+    data_holder.fit_saturation_functions = {"naive": naive, "quadratic": quadratic, "quadratic w/ emission": emission,"quadratic w/ emission & streaming":emission_streaming, "quadratic w/ streaming": streaming}
 
     dpg.configure_item("saturation_model_selector", items=list(data_holder.fit_saturation_functions.keys()))
 
@@ -957,6 +1083,58 @@ def change_streaming_cutoff(sender, app_data, user_data):
         dpg.set_value("quad_stream_plot", [x,y])
     else:
         dpg.add_line_series(x,y,label=f"quadratic w/ streaming",parent="saturation_y_axis",tag="quad_stream_plot")
+
+def update_training_gradient_model(sender, app_data, user_data):
+    if user_data == "recalculate_gradients":
+        noise_reduction = dpg.get_value("training_noise_reduction_checkbox")
+        nuts = dpg.get_value("training_nuts_checkbox")
+        if noise_reduction:
+            data = data_holder.thermals_g_nr
+        else:
+            data = data_holder.thermals_g
+        cutoffs = [1,5,12.5,15,25]
+        samples = [10,9,8,6,5,4]
+
+        data_holder.gradients = []
+        data_holder.gradients_temp = []
+        data_holder.gradients_maxs = []
+
+        for index, thermal in enumerate(data_holder.thermals_g):
+            if nuts:
+                grad, temp = extract_gradient_and_temp_timestamped_NUTS(data[index], data_holder.timestamps[index], data_holder.start_indices[index], cutoffs=cutoffs, samples=samples)
+            else:
+                grad = extract_gradient_timestamped(data[index], data_holder.timestamps[index], 10, data[index][0,:,:].shape)
+                temp = data[index][data_holder.start_indices[index] + 10] - data[index][data_holder.start_indices[index]] 
+
+            data_holder.gradients.append(grad)
+            data_holder.gradients_temp.append(temp)
+            data_holder.gradients_maxs.append(np.max(grad))
+
+    if len(data_holder.fit_saturation_coeffs) == 0:
+        return
+    else:
+        fit_gradient_and_saturation(sender, app_data, user_data)
+
+def update_training_sat_model(sender, app_data, user_data):
+    if user_data == "recalculate_saturations":
+        noise_reduction = dpg.get_value("training_sat_noise_reduction_checkbox")
+        if noise_reduction:
+            data = data_holder.thermals_s_nr
+        else:
+            data = data_holder.thermals_s
+
+        data_holder.saturations = []
+        data_holder.saturations_maxs = []
+
+        for index, thermal in enumerate(data_holder.thermals_g):
+            sats = extract_non_max_steady_state_from_diff(data[index])
+            data_holder.saturations.append(sats)
+            data_holder.saturations_maxs.append(np.max(sats))
+
+    if len(data_holder.fit_grad_coeffs) == 0:
+        return
+    else:
+        fit_gradient_and_saturation(sender, app_data, user_data)
 
 def fit_gradient_and_saturation(sender, app_data, user_data):
     # ok time to fit gradient
@@ -985,7 +1163,7 @@ def fit_gradient_and_saturation(sender, app_data, user_data):
     steady_state_increases_calib_sorted = [x for _, x in sorted(zip(data_holder.mic_peaks, data_holder.saturations_maxs), key=lambda pair: pair[0])]
     steady_state_increases_calib_sorted = np.array(steady_state_increases_calib_sorted)
 
-    streaming_cutoff = dpg.get_value("streaming_cutoff")
+    streaming_cutoff = dpg.get_value("saturation_streaming_cutoff")
 
     thermal_to_pressure_naive, thermal_to_pressure_quadratic, thermal_to_pressure_quadratic_true, thermal_to_pressure_quadratic_true_emission,thermal_to_pressure_quadratic_true_emission_variable_h, thermal_to_pressure_quadratic_true_variable_h, coeffs  = calibrate_steady_state_naive(steady_state_increases_calib_sorted, pressures_calib_sorted,print_report=False,streaming_cutoff=streaming_cutoff)
     data_holder.fit_saturation_coeffs = coeffs
@@ -993,7 +1171,7 @@ def fit_gradient_and_saturation(sender, app_data, user_data):
     dpg.set_value("saturation_coeff_1", coeffs[0][0])
     dpg.set_value("saturation_coeff_2", coeffs[0][1])
 
-    dpg.set_value("saturation_coeff_3", coeffs[2][1])
+    dpg.set_value("saturation_coeff_3", coeffs[2][0])
 
     dpg.set_value("saturation_coeff_4", coeffs[3][0])
     dpg.set_value("saturation_coeff_5", coeffs[3][1])
@@ -1048,6 +1226,15 @@ def fit_gradient_and_saturation(sender, app_data, user_data):
         dpg.set_value("quad_plot", [x,y])
     else:
         dpg.add_line_series(x,y,label=f"quadratic",parent="saturation_y_axis",tag="quad_plot")
+
+    sat = np.linspace(0.00000001,50,200)
+    x = sat.tolist()
+    y = thermal_to_pressure_naive(sat).tolist()
+
+    if dpg.does_item_exist("power_plot"):
+        dpg.set_value("power_plot", [x,y])
+    else:
+        dpg.add_line_series(x,y,label=f"power",parent="saturation_y_axis",tag="power_plot")
 
 def remove_data_group(sender, app_data, user_data):
 
@@ -1194,8 +1381,9 @@ def camera_hovered(sender, app_data, user_data):
 def load_calibration_from_validation(sender, app_data, user_data):
     config_holder.fit_grad_coeffs = data_holder.fit_grad_coeffs
     config_holder.fit_saturation_coeffs = data_holder.fit_saturation_coeffs
+    config_holder.streaming_cutoff = data_holder.streaming_cutoff
 
-    naive, _, quadratic, emission ,emission_streaming, streaming  = get_steady_state_functions(config_holder.fit_saturation_coeffs)
+    naive, _, quadratic, emission ,emission_streaming, streaming  = get_steady_state_functions(config_holder.fit_saturation_coeffs,streaming_cutoff=config_holder.streaming_cutoff)
 
     config_holder.fit_saturation_functions = {"naive": naive, "quadratic": quadratic, "quadratic w/ emission": emission,"quadratic w/ emission & streaming":emission_streaming, "quadratic w/ streaming": streaming}
 
@@ -1227,9 +1415,10 @@ def load_calibration_file(sender, app_data, user_data):
     with open(file_name, 'rb') as inp:
         config_holder.fit_grad_coeffs = pickle.load(inp)
         config_holder.fit_saturation_coeffs = pickle.load(inp)
+        config_holder.streaming_cutoff = pickle.load(inp)
         config_holder.attenuation, config_holder.absorbtion, config_holder.nylon_thread_radius, config_holder.pixel_size, config_holder.nylon_depth, config_holder.nylon_heat_capacity, config_holder.nylon_density, config_holder.air_density, config_holder.air_speed = pickle.load(inp)
     
-    naive, _, quadratic, emission ,emission_streaming, streaming  = get_steady_state_functions(config_holder.fit_saturation_coeffs)
+    naive, _, quadratic, emission ,emission_streaming, streaming  = get_steady_state_functions(config_holder.fit_saturation_coeffs, streaming_cutoff=config_holder.streaming_cutoff)
 
     config_holder.fit_saturation_functions = {"naive": naive, "quadratic": quadratic, "quadratic w/ emission": emission,"quadratic w/ emission & streaming":emission_streaming, "quadratic w/ streaming": streaming}
 
@@ -1260,6 +1449,7 @@ def save_calibration_file(sender, app_data, user_data):
     with open(file_name, 'rb') as inp:
         pickle.dump(data_holder.fit_grad_coeffs, inp,-1)
         pickle.dump(data_holder.fit_saturation_coeffs, inp,-1)
+        pickle.dump(data_holder.streaming_cutoff, inp,-1)
         pickle.dump([attenuation, absorbtion, nylon_thread_radius, pixel_size, nylon_depth, nylon_heat_capacity, nylon_density, air_density, air_speed], inp,-1)
 
 def set_baseline_frame_flag(sender, app_data, user_data):
@@ -1358,6 +1548,115 @@ def save_selected_recording(sender, app_data, user_data):
         pickle.dump(data_holder_measurement.thermals[index], out,-1)
     return
 
+def sort_table(sender, sort_specs):
+
+    # sort_specs scenarios:
+    #   1. no sorting -> sort_specs == None
+    #   2. single sorting -> sort_specs == [[column_id, direction]]
+    #   3. multi sorting -> sort_specs == [[column_id, direction], [column_id, direction], ...]
+    #
+    # notes:
+    #   1. direction is ascending if == 1
+    #   2. direction is ascending if == -1
+
+    # no sorting case
+    if sort_specs is None: return
+
+    rows = dpg.get_item_children(sender, 1)
+    sort_column_id = sort_specs[0][0]
+    column_ids = dpg.get_item_children(sender,0)
+    sort_column_index = column_ids.index(sort_column_id)
+    # create a list that can be sorted based on chosen column's
+    # value, keeping track of row and value used to sort
+    sortable_list = []
+    for row in rows:
+        sortable_cell = dpg.get_item_children(row, 1)[sort_column_index]
+        sortable_list.append([row, dpg.get_value(sortable_cell)])
+
+    def _sorter(e):
+        return e[1]
+
+    sortable_list.sort(key=_sorter, reverse=sort_specs[0][1] < 0)
+
+    # create list of just sorted row ids
+    new_order = []
+    for pair in sortable_list:
+        new_order.append(pair[0])
+    
+    dpg.reorder_items(sender, 1, new_order)
+
+def calculate_all_errors(sender, app_data, user_data):
+
+    # We also want to add a loading icon as this can take a while!
+    dpg.show_item("validation_table_loading")
+
+    # first calcualte all gradients and saturations with and without NR and with and without NUTS
+
+    cutoffs = [1,5,12.5,15,25]
+    samples = [10,9,8,6,5,4]
+
+    saturations = []
+    saturations_nr = []
+
+    gradients = []
+    gradients_nr = []
+    gradients_NUTS = []
+    gradients_NUTS_nr = []
+
+    for i in range(len(data_holder.timestamps)):
+        saturations.append(extract_non_max_steady_state_from_diff(data_holder.thermals_s[i]))
+        saturations_nr.append(extract_non_max_steady_state_from_diff(data_holder.thermals_s_nr[i]))
+
+        grad, temp = extract_gradient_and_temp_timestamped_NUTS(data_holder.thermals_g[i], data_holder.timestamps[i], data_holder.start_indices[i], cutoffs=cutoffs, samples=samples)
+        gradients_NUTS.append(grad)
+        grad, temp = extract_gradient_and_temp_timestamped_NUTS(data_holder.thermals_g_nr[i], data_holder.timestamps[i], data_holder.start_indices[i], cutoffs=cutoffs, samples=samples)
+        gradients_NUTS_nr.append(grad)
+
+        grad = extract_gradient_timestamped(data_holder.thermals_g[i],data_holder.timestamps[i],10,size=data_holder.thermals_g[i][0,:,:].shape)
+        gradients.append(grad)
+        grad = extract_gradient_timestamped(data_holder.thermals_g_nr[i],data_holder.timestamps[i],10,size=data_holder.thermals_g[i][0,:,:].shape)
+        gradients_nr.append(grad)
+        
+    models = {"gradient":["fit","physical"],"saturation":["naive","quadratic","quadratic w/ emission","quadratic w/ emission & streaming","quadratic w/ streaming"]}
+
+    data = {"gradient":{True:{True:gradients_NUTS_nr, False:gradients_nr}, False: {True:gradients_NUTS,False:gradients}}, "saturation":{True:saturations_nr,False:saturations}}
+
+    gradient_functions = {"fit":lambda gradients: press_from_grad_fit(gradients, data_holder.fit_grad_coeffs[1], data_holder.fit_grad_coeffs[2]),"physical":press_from_mesh}
+
+    # delete all rows first
+    dpg.delete_item("validation_results_table",children_only=True,slot=1)
+    # we need for loop for method, model, soak, gauss, noise reduction
+    for noise_reduction in [True,False]:
+        for method in ["gradient","saturation"]:
+            for soak in [False, True]:
+                for gauss in [False, True]: # TODO: IMPLEMENT
+                    for model in models[method]:
+                        for nuts in [True,False]:
+                            if method == "saturation" and nuts:
+                                continue
+                            with dpg.table_row(parent="validation_results_table"):
+                                
+                                if method == "gradient":
+                                    mean_rmse, mean_max_error, mean_ssim = calculate_errors(data[method][noise_reduction][nuts],data_holder.mic_values,method, gradient_functions[model], soak, gauss)
+                                else:
+                                    mean_rmse, mean_max_error, mean_ssim = calculate_errors(data[method][noise_reduction],data_holder.mic_values,method, data_holder.fit_saturation_functions[model], soak, gauss)
+
+                                dpg.add_text(f"{method}") # method
+                                if method == "gradient" and nuts:
+                                    dpg.add_text(f"{model} w/ NUTS")
+                                else:
+                                    dpg.add_text(f"{model}") # model
+                                dpg.add_text(f"{soak}") # soak
+                                dpg.add_text(f"{gauss}") # gauss
+                                dpg.add_text(f"{noise_reduction}") # Noise Reduction
+                                dpg.add_text(f"{mean_rmse}") # Mean RMSE
+                                dpg.add_text(f"{mean_max_error}") # Mean Max Error
+                                dpg.add_text(f"Not implemented") # Mean FWHM Error
+                                dpg.add_text(f"{mean_ssim}") # Mean SSIM
+
+    dpg.hide_item("validation_table_loading")
+
+
 with dpg.window(label="Example Window", tag="Primary Window"):
     with dpg.tab_bar():
         with dpg.tab(label="Measurement"):
@@ -1426,8 +1725,18 @@ with dpg.window(label="Example Window", tag="Primary Window"):
 
             dpg.add_text("Gradient Model Selection:")
             dpg.add_radio_button(("Physical Model", "Fit Model"), horizontal=True,label="Gradient Model",tag="inference_gradient_model_selector",callback=reconvert_gradient)
+            with dpg.group(hoirzontal=True):
+                dpg.add_checkbox(label="Noise Reduction", tag="training_noise_reduction_checkbox",callback=update_inf_gradient_model, user_data = "recalculate_gradients",default_value=True)
+                dpg.add_checkbox(label="Non-Uniform Time Sampling", tag="training_nuts_checkbox",callback=update_inf_gradient_model, user_data = "recalculate_gradients",default_value=True)
+                dpg.add_checkbox(label="Soak", tag="training_soak_checkbox",callback=update_inf_gradient_model) # TODO: implement
+                dpg.add_checkbox(label="Gaussian Heat Modelling", tag="training_gauss_checkbox",callback=update_inf_gradient_model) # TODO: implement
+            
             dpg.add_text("Steady State Model Selection:")
             dpg.add_radio_button(("Physical Model", "Fit Model"), horizontal=True,label="Steady State Model",tag="inference_saturation_model_selector",callback=reconvert_steady_state)
+            with dpg.group(hoirzontal=True):
+                dpg.add_checkbox(label="Noise Reduction", tag="training_sat_noise_reduction_checkbox",callback=update_inf_sat_model, user_data = "recalculate_saturations",default_value=True)
+                dpg.add_checkbox(label="Soak", tag="training_sat_soak_checkbox",callback=update_inf_sat_model) # TODO: implement
+                dpg.add_checkbox(label="Gaussian Heat Modelling", tag="training_sat_gauss_checkbox",callback=update_inf_sat_model) # TODO: implement
 
             with dpg.group(width=200):
                 dpg.add_input_double(label="Sound Frequency", max_value=200000.0, format="%.0f Hz", default_value=40000.0, step=1000)
@@ -1458,6 +1767,7 @@ with dpg.window(label="Example Window", tag="Primary Window"):
             dpg.add_text("Data Currently Converted:")
             dpg.add_listbox(tag="list_box_measurement_converted")
             dpg.add_button(label="View Selected Data",enabled=False, tag="view_converted_data_button",callback=view_converted_measurement)
+            dpg.add_button(label="Save Selected Data",enabled=False, tag="save_converted_data_button",callback=save_converted_measurement)
 
             with dpg.group(horizontal=True):
                 with dpg.plot(label="Pressure (gradient)", tag="converted_data_heat",height=800,width=800,anti_aliased=False):
@@ -1525,6 +1835,18 @@ with dpg.window(label="Example Window", tag="Primary Window"):
 
             Gradient_text = dpg.add_text("No Gradients or Steady States extracted")
             extract_gradient_button = dpg.add_button(label="Extract Gradients and Steady States", callback=extract_gradients_and_saturations,enabled=False)
+            dpg.add_text("Gradient options:")
+            with dpg.group(hoirzontal=True):
+                dpg.add_checkbox(label="Noise Reduction", tag="training_noise_reduction_checkbox",callback=update_training_gradient_model, user_data = "recalculate_gradients",default_value=True)
+                dpg.add_checkbox(label="Non-Uniform Time Sampling", tag="training_nuts_checkbox",callback=update_training_gradient_model, user_data = "recalculate_gradients",default_value=True)
+                dpg.add_checkbox(label="Soak", tag="training_soak_checkbox",callback=update_training_gradient_model) # TODO: implement
+                dpg.add_checkbox(label="Gaussian Heat Modelling", tag="training_gauss_checkbox",callback=update_training_gradient_model) # TODO: implement
+            dpg.add_text("Steady state options:")
+            with dpg.group(hoirzontal=True):
+                dpg.add_checkbox(label="Noise Reduction", tag="training_sat_noise_reduction_checkbox",callback=update_training_sat_model, user_data = "recalculate_saturations",default_value=True)
+                dpg.add_checkbox(label="Soak", tag="training_sat_soak_checkbox",callback=update_training_sat_model) # TODO: implement
+                dpg.add_checkbox(label="Gaussian Heat Modelling", tag="training_sat_gauss_checkbox",callback=update_training_sat_model) # TODO: implement
+
             fit_gradient_button = dpg.add_button(label="Fit Models", callback=fit_gradient_and_saturation,enabled=False)
             with dpg.collapsing_header(label="Change Model Coefficients"):
                 with dpg.group(indent=10):
@@ -1641,6 +1963,10 @@ with dpg.window(label="Example Window", tag="Primary Window"):
                 with dpg.group(horizontal=True):
                     dpg.add_text("Gradient Model:")
                     dpg.add_radio_button(("Physical Model", "Fit Model"), horizontal=True,label="Gradient Model",tag="gradient_model_selector", callback=update_validation_gradient_model)
+                dpg.add_checkbox(label="Noise Reduction", tag="validation_noise_reduction_checkbox",callback=update_validation_gradient_model, user_data = "recalculate_gradients",default_value=True)
+                dpg.add_checkbox(label="Non-Uniform Time Sampling", tag="validation_nuts_checkbox",callback=update_validation_gradient_model, user_data = "recalculate_gradients",default_value=True)
+                dpg.add_checkbox(label="Soak", tag="validation_soak_checkbox",callback=update_validation_gradient_model)
+                dpg.add_checkbox(label="Gaussian Heat Modelling", tag="validation_gauss_checkbox",callback=update_validation_gradient_model)
 
                 with dpg.group(horizontal=True):
                     with dpg.plot(label="Pressure (Gradient)", tag="validation_grad_heat",height=300,width=800,anti_aliased=False):
@@ -1658,10 +1984,14 @@ with dpg.window(label="Example Window", tag="Primary Window"):
                         dpg.add_plot_axis(dpg.mvXAxis, tag="validation_error_x_axis",no_tick_labels=False)
                         dpg.add_plot_axis(dpg.mvYAxis, tag="validation_error_y_axis",no_tick_labels=False)
                     dpg.add_colormap_scale(min_scale=0,max_scale=1,tag="validation_error_legend",height=300,colormap=dpg.mvPlotColormap_RdBu)#mvPlotColormap_RdBu
+                dpg.add_text("SSIM: ",tag="validation_gradient_ssim_text")
                 
                 with dpg.group(horizontal=True):
                     dpg.add_text("Steady State Model:")
                     dpg.add_radio_button(("Physical Model", "Fit Model"), horizontal=True,label="Steady State Model",tag="saturation_model_selector",callback=update_validation_saturation_model)
+                dpg.add_checkbox(label="Noise Reduction", tag="validation_sat_noise_reduction_checkbox",callback=update_validation_saturation_model, user_data = "recalculate_saturations",default_value=True)
+                dpg.add_checkbox(label="Soak", tag="validation_sat_soak_checkbox",callback=update_validation_saturation_model)
+                dpg.add_checkbox(label="Gaussian Heat Modelling", tag="validation_sat_gauss_checkbox",callback=update_validation_saturation_model)
 
                 with dpg.group(horizontal=True):
                         with dpg.plot(label="Pressure (Steady State)", tag="validation_sat_heat",height=300,width=800,anti_aliased=False):
@@ -1679,6 +2009,7 @@ with dpg.window(label="Example Window", tag="Primary Window"):
                             dpg.add_plot_axis(dpg.mvXAxis, tag="validation_error_x_axis2",no_tick_labels=False)
                             dpg.add_plot_axis(dpg.mvYAxis, tag="validation_error_y_axis2",no_tick_labels=False)
                         dpg.add_colormap_scale(min_scale=0,max_scale=1,tag="validation_error_legend2",height=300,colormap=dpg.mvPlotColormap_RdBu)#mvPlotColormap_RdBu
+                dpg.add_text("SSIM: ",tag="validation_saturation_ssim_text")
 
 
             with dpg.group(indent=10):
@@ -1691,6 +2022,32 @@ with dpg.window(label="Example Window", tag="Primary Window"):
 
                         with dpg.group(horizontal=True):
                             dpg.add_button(label="View Selected Data",enabled=False, tag=str(tab2)+"view_converted_data_button_validation",callback=view_thermal_measurement_validataion)
+
+            # table below with all data (errors) presented
+            # what data should be presented? All types of conversion, plus noise reduction, what about soak and gaussian?
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Calculate All Errors For Below Table",callback=calculate_all_errors)
+                dpg.add_loading_indicator(style=1,radius=1.25,show=False,tag="validation_table_loading")#1.25
+
+            with dpg.table(header_row=True, no_host_extendX=True,
+                        borders_innerH=True, borders_outerH=True, borders_innerV=True,
+                        borders_outerV=True, context_menu_in_body=True, row_background=True,
+                        policy=dpg.mvTable_SizingFixedFit, height=500, sortable=True, callback=sort_table,
+                        scrollY=True, delay_search=True, tag="validation_results_table",sort_tristate=True,sort_multi=False):
+
+                dpg.add_table_column(label="Method",no_sort=True,tag="validation_col:1")
+                dpg.add_table_column(label="Model", no_sort=True,tag="validation_col:2")
+                dpg.add_table_column(label="Soak", no_sort=True,tag="validation_col:3")
+                dpg.add_table_column(label="Gauss", no_sort=True,tag="validation_col:4")
+                dpg.add_table_column(label="Noise Reduction", no_sort=True,tag="validation_col:5")
+                dpg.add_table_column(label="Mean RMSE (Pa)", no_sort=False,tag="validation_col:6")
+                dpg.add_table_column(label="Mean Max Error (Pa)", no_sort=False,tag="validation_col:7")
+                dpg.add_table_column(label="Mean FWHM error (mm)", no_sort=False,tag="validation_col:8")
+                dpg.add_table_column(label="Mean SSIM", no_sort=False,tag="validation_col:9")
+
+
+
+                
 
 
 

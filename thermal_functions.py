@@ -2153,7 +2153,7 @@ def extract_steady_state_from_diff(thermal):
     return np.max(thermal[:,:,:]- thermal[0,:,:],axis=(0))
 
 def extract_non_max_steady_state_from_diff(thermal):
-    return thermal[257,:,:]- thermal[0,:,:]
+    return np.max(thermal[:,:,:])- thermal[0,:,:]
     #return thermal[-1,:,:]- thermal[0,:,:]
 
 def extract_mean_non_max_steady_state_from_diff(thermal):
@@ -2469,3 +2469,46 @@ def press_from_gradient_mesh(gradients, attenuation, absorbtion, nylon_thread_ra
 
 def press_from_grad_fit(x,a,b):
     return a*np.power(x,b)
+
+
+def calculate_errors(data,truth,method, model, soak, gauss):
+
+    mean_rmse = 0
+    mean_max_error = 0
+    mean_ssim = 0
+
+    ssims = []
+    rmses = []
+    max_errors = []
+
+    for index, datum in enumerate(data): 
+
+        if soak:
+            datum = heat_soak_model(datum)
+
+        if gauss:
+            datum = datum # TODO: implement gaussian filter
+
+        final_thermal_file = datum
+
+        final_thermal_file[final_thermal_file<= 0] = 0.0000001
+        
+        # get the pressure from thermal
+        pressure_from_therm = model(final_thermal_file)
+
+        error = pressure_from_therm - truth[index]
+        rmse = np.sqrt(np.mean((error)**2))
+        max_error = np.max(np.abs(error))
+
+        ssim_error = ssim(pressure_from_therm, truth[index], data_range=np.max([truth[index],pressure_from_therm]))
+
+        rmses.append(rmse)
+        max_errors.append(max_error)
+        ssims.append(ssim_error)
+
+
+    mean_ssim = np.mean(ssims)
+    mean_rmse = np.mean(rmses)
+    mean_max_error = np.mean(max_errors)
+
+    return mean_rmse, mean_max_error, mean_ssim
