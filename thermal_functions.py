@@ -19,6 +19,7 @@ from scipy.fft import rfft, rfftfreq, irfft
 from scipy.interpolate import UnivariateSpline, InterpolatedUnivariateSpline, CubicSpline, PchipInterpolator, RegularGridInterpolator, make_interp_spline
 import skimage
 from skimage.metrics import structural_similarity as ssim
+from skimage.feature import peak_local_max
 from sklearn.linear_model import LinearRegression
 from scipy.stats import pearsonr
 
@@ -1282,7 +1283,10 @@ def plot_11_error_maps(ground_truths, measurements, errors, labels):
         axs3[(index)//3,(index)%3].title.set_text(f'{labels[index]}kPa target - therm -> press')
 
 def locate_start_thermal(thermal,xs,ys):
-    max_timestamp = 100 # previously 100
+    if thermal.shape[0] >= 100:
+        max_timestamp = 100 # previously 100
+    else:
+        max_timestamp = thermal.shape[0]-1
     ind = np.unravel_index([np.argmax(thermal[max_timestamp,xs[0]:xs[1],ys[0]:ys[1]])], (thermal[max_timestamp,xs[0]:xs[1],ys[0]:ys[1]]).shape)
     #max_timestamp = 100 # previously 100
     #ind = np.unravel_index([np.argmax(thermal[max_timestamp,xs[0]:xs[1],ys[0]:ys[1]]-thermal[0,xs[0]:xs[1],ys[0]:ys[1]])], (thermal[max_timestamp,xs[0]:xs[1],ys[0]:ys[1]]).shape)
@@ -1751,7 +1755,7 @@ def get_steady_state_functions(coeffs, streaming_cutoff=2.8):
         return b*np.sqrt(a*x*x.clip(min=streaming_cutoff))
 
     def water_paper_curve(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = sqrt_mine(temps,coeffs[0][0],coeffs[0][1])
 
@@ -1759,7 +1763,7 @@ def get_steady_state_functions(coeffs, streaming_cutoff=2.8):
         return pressure
     
     def water_paper_curve_quad(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = water_quadratic(temps,coeffs[1][0],coeffs[1][1])
 
@@ -1767,7 +1771,7 @@ def get_steady_state_functions(coeffs, streaming_cutoff=2.8):
         return pressure
     
     def water_paper_curve_quad_true(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = true_water_quadratic(temps,coeffs[2][0])
 
@@ -1775,7 +1779,7 @@ def get_steady_state_functions(coeffs, streaming_cutoff=2.8):
         return pressure
     
     def water_paper_curve_quad_emission(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = true_water_quadratic_with_emission(temps,coeffs[3][0],coeffs[3][1],coeffs[3][2])
 
@@ -1783,19 +1787,19 @@ def get_steady_state_functions(coeffs, streaming_cutoff=2.8):
         return pressure
     
     def water_paper_curve_quad_emission_var_h(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = true_water_quadratic_with_emission_variable_h(temps,coeffs[4][0],coeffs[4][1],coeffs[4][2])
 
-        pressure[pressure<0] = 0
+        pressure[pressure<=0] = 0.00000000001
         return pressure
     
     def water_paper_curve_quad_var_h(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = true_water_quadratic_variable_h(temps,coeffs[5][0],coeffs[5][1])
 
-        pressure[pressure<0] = 0
+        pressure[pressure<=0] = 0.00000001
         return pressure
     
     return water_paper_curve, water_paper_curve_quad, water_paper_curve_quad_true, water_paper_curve_quad_emission, water_paper_curve_quad_emission_var_h, water_paper_curve_quad_var_h
@@ -1892,7 +1896,7 @@ def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, 
     coeffs = [[a7,b7],[a8,b8],[a9],[a10,b10,c10],[a11,b11,c11],[a12,b12]]
 
     def water_paper_curve(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = sqrt_mine(temps,a7,b7)
 
@@ -1900,7 +1904,7 @@ def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, 
         return pressure
     
     def water_paper_curve_quad(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = water_quadratic(temps,a8,b8)
 
@@ -1908,7 +1912,7 @@ def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, 
         return pressure
     
     def water_paper_curve_quad_true(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = true_water_quadratic(temps,a9)
 
@@ -1916,7 +1920,7 @@ def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, 
         return pressure
     
     def water_paper_curve_quad_emission(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = true_water_quadratic_with_emission(temps,a10,b10,c10)
 
@@ -1924,7 +1928,7 @@ def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, 
         return pressure
     
     def water_paper_curve_quad_emission_var_h(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = true_water_quadratic_with_emission_variable_h(temps,a11,b11,c11)
 
@@ -1932,7 +1936,7 @@ def calibrate_steady_state_naive(temp_increases, pressures, print_report=False, 
         return pressure
     
     def water_paper_curve_quad_var_h(temps):
-        temps[temps<0] = 0
+        temps[temps<=0] = 0.00000000001
         pressure = np.empty_like(temps)
         pressure = true_water_quadratic_variable_h(temps,a12,b12)
 
@@ -2153,7 +2157,7 @@ def extract_steady_state_from_diff(thermal):
     return np.max(thermal[:,:,:]- thermal[0,:,:],axis=(0))
 
 def extract_non_max_steady_state_from_diff(thermal):
-    return np.max(thermal[:,:,:])- thermal[0,:,:]
+    return np.max(thermal[:,:,:],axis=(0))- thermal[0,:,:]
     #return thermal[-1,:,:]- thermal[0,:,:]
 
 def extract_mean_non_max_steady_state_from_diff(thermal):
@@ -2182,12 +2186,6 @@ def correct(thermal):
 
 def get_size_from_mic_file(mic_file):
     mic_values = read_beast_file_rms(mic_file,plane_axis_1="y")
-    #mic_bias_values = read_beast_file_bias(mic_files[index],plane_axis_1="y")
-    # TODO: FIX THIS BULLSHIT
-    if np.max(mic_values) < 50:
-        #mic_values = skimage.transform.resize(mic_values,size,order=3)
-        mic_values =  np.reshape(random.sample(list(mic_values.flatten())*5, 37*37),(37,37))
-        #mic_bias_values = np.reshape(random.sample(list(mic_bias_values.flatten())*5, 37*37),(37,37))
     mic_values = np.flip(mic_values, axis=(0,1))
 
     size = mic_values.shape
@@ -2200,7 +2198,7 @@ def load_thermal_file(thermal_file, xs=None, ys=None, start_lower_bound=0, start
         un_corr_thermal, thermal_timestamps = load_flir_file(thermal_file)
         un_corr_thermal = np.einsum("hwt -> thw", un_corr_thermal)
     elif thermal_file.split(".")[-1] == "thermal":
-        with open(thermal_file, 'wb') as inp:
+        with open(thermal_file, 'rb') as inp:
             thermal_timestamps = pickle.load(inp)
             un_corr_thermal = pickle.load(inp)
 
@@ -2210,10 +2208,10 @@ def load_thermal_file(thermal_file, xs=None, ys=None, start_lower_bound=0, start
     thermal_corrected = correct(un_corr_thermal[0,:,:])
     thermal_corrected_nuc = correct(un_corr_thermal_nuc[0,:,:])
 
-    thermal = np.zeros((600,thermal_corrected.shape[0],thermal_corrected.shape[1]))
-    thermal_nuc = np.zeros((600,thermal_corrected_nuc.shape[0],thermal_corrected_nuc.shape[1]))
+    thermal = np.zeros((un_corr_thermal.shape[0],thermal_corrected.shape[0],thermal_corrected.shape[1]))
+    thermal_nuc = np.zeros((un_corr_thermal.shape[0],thermal_corrected_nuc.shape[0],thermal_corrected_nuc.shape[1]))
 
-    for i in range(600):
+    for i in range(un_corr_thermal.shape[0]):
         thermal[i,:,:] = correct(un_corr_thermal[i,:,:])
         thermal_nuc[i,:,:] = correct(un_corr_thermal_nuc[i,:,:])
         thermal_nuc[i,:,:] = cv.blur(thermal_nuc[i,:,:],(7,7))
@@ -2228,8 +2226,11 @@ def load_thermal_file(thermal_file, xs=None, ys=None, start_lower_bound=0, start
         #print(index,start)
         start = start_default # ADJUST THIS TO WORK FOR SINGLE AND DOUBLE
 
-    length = 260
+    length = 260 #TODO: ???? how to do this?
     end = start + length
+
+    if end > thermal.shape[0]:
+        end = thermal.shape[0]
 
 
     cropped_thermal = crop_and_trim_thermal(thermal, start, end, xs, ys)
@@ -2252,7 +2253,7 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
         un_corr_thermal, thermal_timestamps = load_flir_file(thermal_file)
         un_corr_thermal = np.einsum("hwt -> thw", un_corr_thermal)
     elif thermal_file.split(".")[-1] == "thermal":
-        with open(thermal_file, 'wb') as inp:
+        with open(thermal_file, 'rb') as inp:
             thermal_timestamps = pickle.load(inp)
             un_corr_thermal = pickle.load(inp)
 
@@ -2261,10 +2262,10 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
     thermal_corrected = correct(un_corr_thermal[0,:,:])
     thermal_corrected_nuc = correct(un_corr_thermal_nuc[0,:,:])
 
-    thermal = np.zeros((600,thermal_corrected.shape[0],thermal_corrected.shape[1]))
-    thermal_nuc = np.zeros((600,thermal_corrected_nuc.shape[0],thermal_corrected_nuc.shape[1]))
+    thermal = np.zeros((un_corr_thermal.shape[0],thermal_corrected.shape[0],thermal_corrected.shape[1]))
+    thermal_nuc = np.zeros((un_corr_thermal.shape[0],thermal_corrected_nuc.shape[0],thermal_corrected_nuc.shape[1]))
 
-    for i in range(600):
+    for i in range(un_corr_thermal.shape[0]):
         thermal[i,:,:] = correct(un_corr_thermal[i,:,:])
         thermal_nuc[i,:,:] = correct(un_corr_thermal_nuc[i,:,:])
         thermal_nuc[i,:,:] = cv.blur(thermal_nuc[i,:,:],(7,7))
@@ -2274,16 +2275,15 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
         #print(index,start)
         start = start_default # ADJUST THIS TO WORK FOR SINGLE AND DOUBLE
 
-    length = 260
+    length = 260 #TODO: ???? how to do this?
     end = start + length
+
+    if end > thermal.shape[0]:
+        end = thermal.shape[0]
 
     mic_values = read_beast_file_rms(mic_file,plane_axis_1="y")
     #mic_bias_values = read_beast_file_bias(mic_files[index],plane_axis_1="y")
-    # TODO: FIX THIS BULLSHIT
-    if np.max(mic_values) < 50:
-        #mic_values = skimage.transform.resize(mic_values,size,order=3)
-        mic_values =  np.reshape(random.sample(list(mic_values.flatten())*5, 37*37),(37,37))
-        #mic_bias_values = np.reshape(random.sample(list(mic_bias_values.flatten())*5, 37*37),(37,37))
+
     mic_values = np.flip(mic_values, axis=(0,1))
 
     size = mic_values.shape
@@ -2379,7 +2379,7 @@ def load_thermal_and_mic_file(thermal_file,mic_file, xs, ys,start_lower_bound=10
     cropped_thermal_nr = crop_and_trim_thermal(thermal_nuc, start, end, xs, ys)
     cropped_thermal2_nr = crop_and_trim_thermal(thermal_nuc, start, end, xs2, ys2)
 
-    ambient = np.percentile(thermal[0],10)
+    ambient = np.percentile(cropped_thermal[0],10)
 
     # TESTING DOWNSCALE AGAIN!
     downscaled_thermals = (downscale_thermal(cropped_thermal,size,3,length))
@@ -2465,13 +2465,18 @@ def press_from_gradient_mesh(gradients, attenuation, absorbtion, nylon_thread_ra
     air_width = pixel_size
     air_depth = nylon_depth
 
-    return np.sqrt( (nylon_heat_capacity * nylon_density *  nylon_volume * air_density * air_speed)/((1-np.exp(-2*attenuation*air_depth))*absorbtion*air_width*air_height) ) * np.sqrt(gradients)
+    gradients_temp = copy.deepcopy(gradients)
+    gradients_temp[gradients_temp<=0] = 0.00000000001
+
+    return np.sqrt( (nylon_heat_capacity * nylon_density *  nylon_volume * air_density * air_speed)/((1-np.exp(-2*attenuation*air_depth))*absorbtion*air_width*air_height) ) * np.sqrt(gradients_temp)
 
 def press_from_grad_fit(x,a,b):
-    return a*np.power(x,b)
+    x_temp = copy.deepcopy(x)
+    x_temp[x<=0] = 0.00000000001
+    return a*np.power(x_temp,b)
 
 
-def calculate_errors(data,truth,method, model, soak, gauss):
+def calculate_errors(data,truth,method, model, soak, gauss, gauss_params, extra_grads=None, ambients=None):
 
     mean_rmse = 0
     mean_max_error = 0
@@ -2487,14 +2492,17 @@ def calculate_errors(data,truth,method, model, soak, gauss):
             datum = heat_soak_model(datum)
 
         if gauss:
-            datum = datum # TODO: implement gaussian filter
+            datum = heat_diffusion_model_general(datum, gauss_params[0], gauss_params[1],gauss_params[2],gauss_params[3])
 
         final_thermal_file = datum
 
         final_thermal_file[final_thermal_file<= 0] = 0.0000001
         
         # get the pressure from thermal
-        pressure_from_therm = model(final_thermal_file)
+        if method =="Physical Model":
+            pressure_from_therm = model(final_thermal_file,extra_grads[index],ambients[index])
+        else:
+            pressure_from_therm = model(final_thermal_file)
 
         error = pressure_from_therm - truth[index]
         rmse = np.sqrt(np.mean((error)**2))
@@ -2512,3 +2520,131 @@ def calculate_errors(data,truth,method, model, soak, gauss):
     mean_max_error = np.mean(max_errors)
 
     return mean_rmse, mean_max_error, mean_ssim
+
+
+def heat_diffusion_model_general(thermal,mag_scale_factor,fwhms=(7,6),min_distance=10,threshold_rel=0.2):
+    # for every peak above certain prominence, apply a gaussian filter, comprised of two gaussians.
+
+    thermal_centers = peak_local_max(thermal, min_distance=min_distance,threshold_rel=threshold_rel)
+
+    thermal_temp = copy.deepcopy(thermal)
+
+    for thermal_center in thermal_centers:
+        #thermal_center = (thermal_center[1],thermal_center[0])
+        mag = mag_scale_factor*thermal[thermal_center[0],thermal_center[1]]
+        large_size = thermal.shape[1]
+        small_size = thermal.shape[0]
+        #thermal_center = (thermal_center[1],thermal_center[0])
+        gauss1 = mag*makeGaussian(large_size,fwhms[0],center=(thermal_center[1],thermal_center[0]))[:small_size,:]
+        gauss2 = mag*makeGaussian(large_size,fwhms[1],center=(thermal_center[1],thermal_center[0]))[:small_size,:]
+
+        #thermal_temp[thermal_center[0],thermal_center[1]] = 60
+        thermal_temp = thermal_temp -  (gauss1-gauss2)
+    return thermal_temp
+
+def get_air_model_image(steady_temp,pixel_size=1e-3,min_distance=10,relative_threshold=0.2):
+
+    ys = [0.011,0.11,0.17,0.33,0.56,2.9,0.56,0.33,0.17,0.11,0.011]
+    xs = [-5,-4,-3,-2,-1,0,1,2,3,4,5]
+    #xs_interp = np.linspace(-5,5,num=1000)
+    #spl = CubicSpline(xs, ys)
+    air_model = PchipInterpolator(xs,ys)
+    #air_model = spl
+
+    thermal_centers = peak_local_max(steady_temp, min_distance=min_distance,threshold_rel=relative_threshold)
+
+    air_model_image = np.zeros_like(steady_temp)
+
+    for thermal_center in thermal_centers:
+        ind = thermal_center
+
+        pixel_size_in_cm = pixel_size*100
+        pixels_in_cm = int(1/pixel_size_in_cm)
+
+        air_model_image = np.ones_like(steady_temp)
+        for x in range(-ind[0],steady_temp.shape[0]-ind[0]):
+            for y in range(-ind[1],steady_temp.shape[1]-ind[1]):
+                air_model_image[x+ind[0],y+ind[1]] += air_model(np.sqrt((x/pixels_in_cm)**2+(y/pixels_in_cm)**2))
+
+    air_model_image = air_model_image/np.max(air_model_image)
+
+    return air_model_image
+
+def get_air_model_image2(steady_temp, pixel_size=1e-3,min_distance=10,relative_threshold=0.2):
+
+    air_speed_data = [[0.02,0.034,0.0031,0,0,0],
+                [0.065,0.072,0.075,0.022,0.0023,0],
+                [0.07,0.14,0.1,0.044,0.0031,0.00077],
+                [0.22,0.16,0.08,0,0.01,0.0062],
+                [0.34,0.23,0.17,0.083,0.077,0.0031],
+                [2.9,0.56,0.33,0.17,0.11,0.011],
+                [0.34,0.23,0.17,0.083,0.077,0.0031],
+                [0.22,0.16,0.08,0,0.01,0.0062],
+                [0.07,0.14,0.1,0.044,0.0031,0.00077],
+                [0.065,0.072,0.075,0.022,0.0023,0],
+                [0.02,0.034,0.0031,0,0,0]]
+    
+    thermal_centers = peak_local_max(steady_temp, min_distance=min_distance,threshold_rel=relative_threshold)
+    air_model_image2 = np.zeros_like(steady_temp)
+    
+    mwidth = int(np.floor(steady_temp.shape[0]/2))
+    mheight = int(np.floor(steady_temp.shape[1]/2))
+
+    air_speed_data = np.array(air_speed_data)
+    air_speed_data = np.concatenate((np.flip(air_speed_data[:,1:],axis=1),air_speed_data),axis=1)
+
+    pixel_size_in_cm = pixel_size*100
+    pixels_in_cm = int(1/pixel_size_in_cm) # 10 by default
+    center_of_image = int((air_speed_data.shape[0]*pixels_in_cm)/2) # lets calculate this
+
+    for thermal_center in thermal_centers:
+
+        ind = thermal_center
+
+        m_offsetx = mwidth - ind[0]
+        m_offsety = mheight - ind[1]
+
+        air_model_image2 += skimage.transform.rescale(air_speed_data,pixels_in_cm,order=2)[center_of_image-mwidth+m_offsetx-1:center_of_image+mwidth+m_offsetx,center_of_image-mheight+m_offsety-1:center_of_image+mheight+m_offsety]
+    
+
+    air_model_image2 = air_model_image2/np.max(air_model_image2)
+
+    air_model_image2[air_model_image2 <= 0] = 0.0000000000001
+
+    return air_model_image2
+
+def physical_model_saturation(thermal,ambient,method,gradient_function,emissitivity,h_from_grads,thread_diameter,thread_per_pixel,thread_not_straight_factor,pixel_size,thermal_conductivity,density,specific_heat_capacity_nylon,air_model_image=None):
+
+    thermal_copy = np.copy(thermal)
+    thermal_copy[thermal_copy<=0] = 1e-8
+
+    perimeter = np.pi*(thread_diameter) * thread_per_pixel * (thread_not_straight_factor) * pixel_size * (1-(0.5 * 0.57)) # 35 strands of 1mm in length per mm^2 # now surface area. last part takes care of the fact that some of the thread touches itself
+    area = ((np.pi*(thread_diameter)**2)/4) * thread_per_pixel * (thread_not_straight_factor) * pixel_size # now volume
+    stefan_boltz = 5.6703e-8
+
+    convection = perimeter*thermal_copy
+    conduction = (area*thermal_conductivity*laplace_2d_diag(thermal_copy,pixel_size,pixel_size))
+    radiation = (perimeter*emissitivity*stefan_boltz*((thermal_copy+ambient+274.15 )**4 - (ambient+274.15)**4))
+
+    h_from_grad = h_from_grads[method]
+
+    h_from_grad = np.interp(np.max(thermal_copy),h_from_grad[1],h_from_grad[0])
+
+    match method:
+        case "Uniform":
+            q = ((conduction+convection*h_from_grad + radiation) / area) / (density * specific_heat_capacity_nylon)
+        case "Steady State":
+            q = ((conduction+convection*thermal_copy*h_from_grad + radiation) / area) / (density * specific_heat_capacity_nylon)
+        case "Streaming-Interpolated":
+            q = ((conduction+convection*h_from_grad*air_model_image + radiation) / area) / (density * specific_heat_capacity_nylon)
+        case "Streaming-Upscaled":
+            q = ((conduction+convection*h_from_grad*air_model_image + radiation) / area) / (density * specific_heat_capacity_nylon)
+        case "Gradient":
+            air_model_gradient = np.sqrt(np.abs(air_model_image)) * np.sign(air_model_image)
+            q = ((conduction+convection*h_from_grad*air_model_gradient + radiation) / area) / (density * specific_heat_capacity_nylon)
+
+    q[q<=0] = 0.0000000001
+
+    pressure_from_thermal = gradient_function(q)
+
+    return pressure_from_thermal 
